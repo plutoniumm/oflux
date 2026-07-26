@@ -1,0 +1,40 @@
+# ── build output ────────────────────────────────────────────────────────────
+/oflux
+/dist/
+/build/
+*.app
+*.dmg
+*.zip
+
+# Bundled engine: fetched by `make engine`, never committed (~120 MB)
+/third_party/
+
+# Generated from packaging/oflux.svg by `make icons`.
+# NOTE: internal/menubar/icon.png is deliberately NOT ignored — it is go:embed'ed,
+# so the Go build needs it present in a fresh clone.
+/packaging/oflux.icns
+/packaging/oflux-512.png
+
+# ── credentials / personal data ─────────────────────────────────────────────
+# verify.sh holds an Apple ID + app-specific password (see verify.sh.example)
+/verify.sh
+*.p12
+*.cer
+*.certSigningRequest
+*.mobileprovision
+.env
+.env.*
+*.pem
+*.key
+
+# ── Go ──────────────────────────────────────────────────────────────────────
+*.test
+*.out
+coverage.*
+
+# ── macOS / editors ─────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+

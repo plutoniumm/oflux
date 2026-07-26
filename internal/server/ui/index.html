@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oflux</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23F2E7D5'/%3E%3Cpath d='M20 76V54C20 38 32 28 50 28C68 28 80 38 80 54V76Z' fill='%23DB964F'/%3E%3Cpath d='M27 40L24 19L42 30Z' fill='%23DB964F'/%3E%3Cpath d='M73 40L76 19L58 30Z' fill='%23DB964F'/%3E%3Cpath d='M23 43H47V51C47 55 43 57 37.5 57C29.5 57 23 53 23 47.5Z' fill='%23241A12'/%3E%3Cpath d='M77 43H53V51C53 55 57 57 62.5 57C70.5 57 77 53 77 47.5Z' fill='%23241A12'/%3E%3Crect x='46.5' y='44.5' width='7' height='3' rx='1.5' fill='%23241A12'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --paper:  #F2E7D5;
+    --muzzle: #FBF6EC;
+    --pelt:   #DB964F;
+    --ember:  #A25B27;
+    --snout:  #5A3316;
+    --shade:  #241A12;
+    --rule:   rgba(36, 26, 18, .16);
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  /* Must beat the display values set on .readout/.drop etc, or [hidden]
+     elements stay on screen. */
+  [hidden] { display: none !important; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--shade);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- chrome ---------- */
+
+  .masthead {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .masthead svg { width: 30px; height: 30px; border-radius: 8px; flex: none; }
+  .wordmark {
+    font-size: 19px;
+    font-weight: 800;
+    letter-spacing: -.03em;
+  }
+  .status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--snout);
+  }
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--pelt);
+    box-shadow: 0 0 0 3px rgba(219,150,79,.22);
+  }
+  .dot.off { background: var(--rule); box-shadow: none; }
+
+  /* ---------- layout ---------- */
+
+  .bench {
+    display: grid;
+    grid-template-columns: minmax(300px, 380px) 1fr;
+    gap: 26px;
+    padding: 26px 22px 40px;
+    max-width: 1400px;
+    margin: 0 auto;
+    align-items: start;
+  }
+  @media (max-width: 860px) {
+    .bench { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- console (left) ---------- */
+
+  .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
+
+  .label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--snout);
+    margin-bottom: 7px;
+  }
+
+  select, textarea, input[type=text], input[type=number] {
+    width: 100%;
+    font-family: inherit;
+    font-size: 14px;
+    color: var(--shade);
+    background: var(--muzzle);
+    border: 1px solid var(--rule);
+    border-radius: 9px;
+    padding: 10px 11px;
+    transition: border-color .15s;
+  }
+  select { font-family: var(--mono); font-size: 13px; }
+  textarea { resize: vertical; min-height: 88px; line-height: 1.45; }
+  input[type=number] { font-family: var(--mono); }
+
+  select:focus-visible, textarea:focus-visible,
+  input:focus-visible, button:focus-visible, .drop:focus-visible {
+    outline: 2px solid var(--pelt);
+    outline-offset: 2px;
+  }
+  select:hover, textarea:hover, input:hover { border-color: var(--snout); }
+
+  /* image input — retires entirely for generate-only models */
+  .drop {
+    display: block;
+    width: 100%;
+    border: 1.5px dashed var(--rule);
+    border-radius: 11px;
+    background: var(--muzzle);
+    padding: 20px 14px;
+    text-align: center;
+    cursor: pointer;
+    font-size: 13.5px;
+    color: var(--snout);
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--pelt); background: #fff; }
+  .drop b { color: var(--shade); font-weight: 650; }
+  .drop.has { padding: 9px; border-style: solid; }
+  .drop.has img {
+    width: 100%; max-height: 190px; object-fit: contain;
+    border-radius: 6px; display: block;
+  }
+  .clear {
+    margin-top: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--snout);
+    background: none; border: 0; padding: 4px;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+
+  details.more { margin-top: 4px; }
+  details.more > summary {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--snout);
+    cursor: pointer;
+    padding: 6px 0;
+    list-style: none;
+  }
+  details.more > summary::-webkit-details-marker { display: none; }
+  details.more > summary::before { content: "+ "; }
+  details.more[open] > summary::before { content: "– "; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  .run {
+    width: 100%;
+    margin-top: 20px;
+    padding: 13px;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -.01em;
+    color: var(--muzzle);
+    background: var(--shade);
+    border: 0;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .15s, transform .06s;
+  }
+  .run:hover:not(:disabled) { background: var(--ember); }
+  .run:active:not(:disabled) { transform: translateY(1px); }
+  .run:disabled { opacity: .45; cursor: default; }
+
+  .note {
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--snout);
+  }
+  .note.bad { color: #8C2F1E; }
+
+  /* ---------- the well (right) ---------- */
+
+  .well {
+    background: var(--shade);
+    border-radius: 14px;
+    padding: 14px;
+    /* Fill the viewport so the stage anchors the page instead of floating in
+       a field of empty chassis. */
+    min-height: min(760px, calc(100vh - 132px));
+    display: flex;
+    flex-direction: column;
+    box-shadow: inset 0 2px 14px rgba(0,0,0,.5);
+  }
+  .plate {
+    flex: 1;
+    display: grid;
+    place-items: center;
+    position: relative;
+    overflow: hidden;
+    border-radius: 7px;
+  }
+  .plate img { max-width: 100%; max-height: 68vh; display: block; border-radius: 4px; }
+
+  .empty {
+    text-align: center;
+    color: rgba(242,231,213,.42);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.7;
+    padding: 30px;
+  }
+  .empty span { color: rgba(242,231,213,.7); }
+
+  /* developing: a slow sweep while the model denoises */
+  .working { text-align: center; color: rgba(242,231,213,.62); font-family: var(--mono); font-size: 12.5px; }
+  .sweep {
+    width: 190px; height: 3px; margin: 0 auto 14px;
+    border-radius: 2px;
+    background: rgba(242,231,213,.14);
+    overflow: hidden;
+  }
+  .sweep::after {
+    content: "";
+    display: block;
+    width: 45%; height: 100%;
+    border-radius: 2px;
+    background: var(--pelt);
+    animation: sweep 1.5s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(320%); }
+  }
+  .elapsed { font-variant-numeric: tabular-nums; }
+
+  .readout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(242,231,213,.12);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: rgba(242,231,213,.55);
+  }
+  .readout .spacer { margin-left: auto; }
+  .act {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--paper);
+    background: rgba(242,231,213,.1);
+    border: 0;
+    border-radius: 6px;
+    padding: 6px 11px;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background .15s;
+  }
+  .act:hover { background: var(--pelt); color: var(--shade); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .001s !important; transition-duration: .001s !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <svg viewBox="0 0 100 100" aria-hidden="true">
+    <rect width="100" height="100" rx="22" fill="#F2E7D5"/>
+    <path d="M20 76 V54 C20 38 32 28 50 28 C68 28 80 38 80 54 V76 Z" fill="#DB964F"/>
+    <path d="M27 40 L24 19 L42 30 Z" fill="#DB964F"/><path d="M73 40 L76 19 L58 30 Z" fill="#DB964F"/>
+    <path d="M29.5 36 L27.5 25.5 L37 31 Z" fill="#A25B27"/><path d="M70.5 36 L72.5 25.5 L63 31 Z" fill="#A25B27"/>
+    <rect x="30" y="68" width="16" height="10" rx="5" fill="#A25B27"/>
+    <rect x="54" y="68" width="16" height="10" rx="5" fill="#A25B27"/>
+    <path d="M23 43 H47 V51 C47 55 43 57 37.5 57 C29.5 57 23 53 23 47.5 Z" fill="#241A12"/>
+    <path d="M77 43 H53 V51 C53 55 57 57 62.5 57 C70.5 57 77 53 77 47.5 Z" fill="#241A12"/>
+    <rect x="46.5" y="44.5" width="7" height="3" rx="1.5" fill="#241A12"/>
+    <path d="M46 60.5 L54 60.5 L50 66 Z" fill="#5A3316"/>
+  </svg>
+  <div class="wordmark">oflux</div>
+  <div class="status"><span class="dot off" id="dot"></span><span id="statusText">connecting</span></div>
+</header>
+
+<main class="bench">
+  <form id="form" autocomplete="off">
+    <div class="field">
+      <label class="label" for="model">Model</label>
+      <select id="model"></select>
+    </div>
+
+    <div class="field" id="imageField" hidden>
+      <label class="label" for="drop">Image to edit</label>
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose an image to edit">
+        Drop an image, paste, or <b>browse</b>
+      </div>
+      <input type="file" id="file" accept="image/*" hidden>
+      <button type="button" class="clear" id="clear" hidden>Remove image</button>
+    </div>
+
+    <div class="field">
+      <label class="label" for="prompt">Prompt</label>
+      <textarea id="prompt" placeholder="Describe the change you want."></textarea>
+    </div>
+
+    <details class="more">
+      <summary>Settings</summary>
+      <div class="field" style="margin-top:10px">
+        <label class="label" for="negative">Avoid</label>
+        <input type="text" id="negative" placeholder="blurry, low quality">
+      </div>
+      <div class="field pair">
+        <div>
+          <label class="label" for="steps">Steps</label>
+          <input type="number" id="steps" min="1" max="150" placeholder="model default">
+        </div>
+        <div>
+          <label class="label" for="seed">Seed</label>
+          <input type="number" id="seed" placeholder="random">
+        </div>
+      </div>
+    </details>
+
+    <button type="submit" class="run" id="run" disabled>Loading models…</button>
+    <p class="note" id="note"></p>
+  </form>
+
+  <section class="well">
+    <div class="plate" id="plate">
+      <div class="empty" id="empty">
+        <span>Nothing developed yet.</span><br>
+        Pick a model, write a prompt, run it.
+      </div>
+    </div>
+    <div class="readout" id="readout" hidden>
+      <span id="meta"></span>
+      <span class="spacer"></span>
+      <button type="button" class="act" id="reuse">Use as input</button>
+      <a class="act" id="save" download="oflux.png">Save</a>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    model: $("model"), prompt: $("prompt"), negative: $("negative"),
+    steps: $("steps"), seed: $("seed"), run: $("run"), note: $("note"),
+    form: $("form"), drop: $("drop"), file: $("file"), clear: $("clear"),
+    imageField: $("imageField"), plate: $("plate"), empty: $("empty"),
+    readout: $("readout"), meta: $("meta"), save: $("save"), reuse: $("reuse"),
+    dot: $("dot"), statusText: $("statusText"),
+  };
+
+  let models = [];
+  let inputDataURL = null;   // the image being edited
+  let busy = false;
+
+  const currentModel = () => models.find((m) => m.name === els.model.value);
+  const isEdit = () => currentModel()?.mode === "edit";
+
+  function say(msg, bad) {
+    els.note.textContent = msg || "";
+    els.note.classList.toggle("bad", !!bad);
+  }
+
+  // ---- models ----------------------------------------------------------
+
+  async function loadModels() {
+    try {
+      const r = await fetch("/api/tags");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      models = (await r.json()).models || [];
+    } catch (e) {
+      els.statusText.textContent = "daemon unreachable";
+      els.run.textContent = "Daemon unreachable";
+      say("Can't reach the oflux daemon. Start it from the menu bar, or run: oflux serve", true);
+      return;
+    }
+    els.dot.classList.remove("off");
+    els.statusText.textContent = models.length + (models.length === 1 ? " model" : " models");
+
+    if (!models.length) {
+      els.model.innerHTML = "<option>No models installed</option>";
+      els.run.textContent = "No models installed";
+      say("Install one first, e.g.  oflux pull qwen-image-edit");
+      return;
+    }
+    // Keep the user's choice across refreshes — this reruns after every
+    // generation to update the "loaded" markers.
+    const keep = els.model.value;
+    els.model.innerHTML = models
+      .map((m) => `<option value="${m.name}">${m.name}  ·  ${m.mode}${m.loaded ? "  ·  loaded" : ""}</option>`)
+      .join("");
+    if (keep && models.some((m) => m.name === keep)) els.model.value = keep;
+    els.run.disabled = false;
+    syncMode();
+  }
+
+  // The edit/generate split is real in the engine, so the form reflects it:
+  // a generate-only model retires the image input rather than lying about it.
+  function syncMode() {
+    const edit = isEdit();
+    els.imageField.hidden = !edit;
+    els.run.textContent = edit ? "Edit image" : "Generate image";
+    els.prompt.placeholder = edit
+      ? "Describe the change you want."
+      : "Describe the image you want.";
+    if (!edit) say("");
+  }
+
+  // ---- image input -----------------------------------------------------
+
+  function setInput(dataURL) {
+    inputDataURL = dataURL;
+    if (!dataURL) {
+      els.drop.classList.remove("has");
+      els.drop.innerHTML = "Drop an image, paste, or <b>browse</b>";
+      els.clear.hidden = true;
+      return;
+    }
+    els.drop.classList.add("has");
+    els.drop.innerHTML = "";
+    const img = new Image();
+    img.src = dataURL;
+    img.alt = "Image to edit";
+    els.drop.appendChild(img);
+    els.clear.hidden = false;
+  }
+
+  function readFile(f) {
+    if (!f || !f.type.startsWith("image/")) return;
+    const fr = new FileReader();
+    fr.onload = () => setInput(fr.result);
+    fr.readAsDataURL(f);
+  }
+
+  els.drop.addEventListener("click", () => els.file.click());
+  els.drop.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); els.file.click(); }
+  });
+  els.file.addEventListener("change", () => readFile(els.file.files[0]));
+  els.clear.addEventListener("click", () => { setInput(null); els.file.value = ""; });
+  ["dragenter", "dragover"].forEach((t) =>
+    els.drop.addEventListener(t, (e) => { e.preventDefault(); els.drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((t) =>
+    els.drop.addEventListener(t, () => els.drop.classList.remove("over")));
+  els.drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    readFile(e.dataTransfer.files[0]);
+  });
+  window.addEventListener("paste", (e) => {
+    if (!isEdit()) return;
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+    if (item) readFile(item.getAsFile());
+  });
+
+  els.model.addEventListener("change", syncMode);
+
+  // ---- run -------------------------------------------------------------
+
+  function working(on, startedAt) {
+    if (!on) return;
+    els.plate.innerHTML =
+      '<div class="working"><div class="sweep"></div>' +
+      'developing<span class="elapsed" id="elapsed"></span></div>';
+    const tick = () => {
+      const el = $("elapsed");
+      if (!el) return;
+      el.textContent = " · " + Math.round((Date.now() - startedAt) / 1000) + "s";
+    };
+    tick();
+    return setInterval(tick, 1000);
+  }
+
+  els.form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const model = currentModel();
+    if (!model) return;
+
+    const prompt = els.prompt.value.trim();
+    if (!prompt) { say("Write a prompt first.", true); els.prompt.focus(); return; }
+    if (isEdit() && !inputDataURL) { say("Choose an image to edit.", true); return; }
+
+    const body = { model: model.name, prompt };
+    if (isEdit()) body.image = inputDataURL;
+    if (els.negative.value.trim()) body.negative_prompt = els.negative.value.trim();
+    if (els.steps.value) body.steps = Number(els.steps.value);
+    if (els.seed.value) body.seed = Number(els.seed.value);
+
+    busy = true;
+    els.run.disabled = true;
+    const wasLabel = els.run.textContent;
+    els.run.textContent = "Working…";
+    say("First run of a model loads it into memory, which can take a few minutes.");
+    els.readout.hidden = true;
+    const started = Date.now();
+    const timer = working(true, started);
+
+    try {
+      const r = await fetch(isEdit() ? "/v1/edit" : "/v1/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+
+      const src = "data:image/png;base64," + data.images[0];
+      const secs = Math.round((Date.now() - started) / 1000);
+      els.plate.innerHTML = "";
+      const img = new Image();
+      img.alt = prompt;
+      // onload before src, so a cached/instant decode can't beat the handler.
+      img.onload = () => {
+        els.meta.textContent = `${data.model} · ${img.naturalWidth}×${img.naturalHeight} · ${secs}s`;
+      };
+      img.src = src;
+      els.plate.appendChild(img);
+      els.save.href = src;
+      els.save.download = `oflux-${Date.now()}.png`;
+      els.reuse.hidden = !models.some((m) => m.mode === "edit");
+      els.reuse.onclick = () => {
+        setInput(src);
+        const editModel = models.find((m) => m.mode === "edit");
+        if (!isEdit() && editModel) { els.model.value = editModel.name; syncMode(); }
+        els.prompt.focus();
+      };
+      els.readout.hidden = false;
+      say("");
+    } catch (err) {
+      els.plate.innerHTML = '<div class="empty"><span>That didn\'t run.</span></div>';
+      say(String(err.message || err), true);
+    } finally {
+      clearInterval(timer);
+      busy = false;
+      els.run.disabled = false;
+      els.run.textContent = wasLabel;
+      loadModels().catch(() => {});
+    }
+  });
+
+  loadModels();
+})();
+</script>
+</body>
+</html>
