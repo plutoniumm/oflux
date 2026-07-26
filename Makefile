@@ -1,4 +1,6 @@
-VERSION ?= 1.0.0
+VERSION ?= $(shell cat VERSION)
+# Codename for this release, used in the GitHub release title.
+RELEASE_NAME ?= groß
 BIN := dist/oflux
 
 .PHONY: build test race live-test smoke engine icons app dmg sign notarize release install clean
@@ -34,7 +36,7 @@ sign: app ## sign the app locally (ad-hoc, or a cert if SIGN_IDENTITY is set)
 	./scripts/sign-app.sh
 
 release: ## Developer-ID signed + notarized .dmg/.zip (VERSION=x.y.z). Publish: ./scripts/release.sh --publish
-	VERSION=$(VERSION) ./scripts/release.sh
+	VERSION=$(VERSION) RELEASE_NAME="$(RELEASE_NAME)" ./scripts/release.sh
 
 notarize: ## notarize + staple an already-built artifact, e.g. make notarize ART=dist/oflux-1.0.0.dmg
 	./scripts/notarize.sh $(ART)

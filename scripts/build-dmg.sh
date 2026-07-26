@@ -2,8 +2,8 @@
 # Package dist/oflux.app into a compressed .dmg. Run build-app.sh first.
 set -euo pipefail
 
-VERSION="${VERSION:-1.0.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="${VERSION:-$(cat "$ROOT/VERSION")}"
 APP="$ROOT/dist/oflux.app"
 DMG="$ROOT/dist/oflux-$VERSION.dmg"
 

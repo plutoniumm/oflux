@@ -3,8 +3,8 @@
 # oflux binary and, when available, the Metal sd-server engine.
 set -euo pipefail
 
-VERSION="${VERSION:-1.0.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="${VERSION:-$(cat "$ROOT/VERSION")}"
 APP="$ROOT/dist/oflux.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"

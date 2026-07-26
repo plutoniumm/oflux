@@ -13,7 +13,7 @@ pkill -f "oflux serve"   2>/dev/null || true
 pkill -f "oflux menubar" 2>/dev/null || true
 sleep 1
 
-VERSION="${VERSION:-1.0.0}" ./scripts/build-app.sh
+VERSION="${VERSION:-$(cat VERSION)}" ./scripts/build-app.sh
 ./scripts/sign-app.sh
 
 # Choose an install dir we can write without sudo.

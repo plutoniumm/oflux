@@ -6,11 +6,14 @@
 # (see README "Signing"). Refuses to build an ad-hoc release, because the
 # updater verifies the publisher's Team ID before installing a new build.
 #
-#   VERSION=1.0.0 ./scripts/release.sh
-#   VERSION=1.0.0 ./scripts/release.sh --publish
+#   VERSION=1.1.0 ./scripts/release.sh
+#   VERSION=1.1.0 ./scripts/release.sh --publish
+#
+# RELEASE_NAME is an optional codename shown in the GitHub release title.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-$(cat "$ROOT/VERSION")}"
+RELEASE_NAME="${RELEASE_NAME:-}"
 PUBLISH=0; [ "${1:-}" = "--publish" ] && PUBLISH=1
 
 # `|| true`: with `set -e`+pipefail a no-match grep would abort the script
@@ -53,7 +56,9 @@ echo "==> signed by: $IDENTITY"
 if [ "$PUBLISH" = 1 ]; then
   command -v gh >/dev/null || { echo "error: gh CLI required to publish" >&2; exit 1; }
   notes="macOS (Apple Silicon) menu-bar build with the bundled Metal sd-server engine. Signed with a Developer ID and notarized by Apple, so it opens normally. Install: open the .dmg and drag oflux.app to Applications; the fox appears in your menu bar and models download on demand. Verify downloads against SHA256SUMS."
+  title="oflux v$VERSION"
+  [ -n "$RELEASE_NAME" ] && title="$title — $RELEASE_NAME"
   gh release create "v$VERSION" "$DMG" "$ZIP" dist/SHA256SUMS \
-    --title "oflux v$VERSION" --notes "$notes"
+    --title "$title" --notes "$notes"
   echo "==> published v$VERSION"
 fi
