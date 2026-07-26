@@ -11,7 +11,18 @@ type Mode string
 const (
 	ModeEdit     Mode = "edit"
 	ModeGenerate Mode = "generate"
+	// ModeBoth is a hybrid: the same weights generate from text alone and edit
+	// when given reference images. FLUX.2 (dev and klein) and Qwen-Image-Edit
+	// work this way — verified by running both paths against the engine — so
+	// describing them as one or the other hides half of what they do.
+	ModeBoth Mode = "both"
 )
+
+// CanEdit reports whether a model in this mode accepts an input image.
+func (m Mode) CanEdit() bool { return m == ModeEdit || m == ModeBoth }
+
+// CanGenerate reports whether a model in this mode can run from text alone.
+func (m Mode) CanGenerate() bool { return m == ModeGenerate || m == ModeBoth }
 
 // Role identifies what a component file is within a diffusion pipeline. The
 // role names also map 1:1 onto the {placeholder} tokens used in
@@ -26,6 +37,13 @@ const (
 	RoleT5XXL     Role = "t5xxl"     // T5-XXL text encoder     -> --t5xxl    (Flux)
 	RoleLLM       Role = "llm"       // LLM text encoder        -> --llm      (Qwen/Z-Image)
 	RoleMMProj    Role = "mmproj"    // vision projector        -> --llm_vision (Qwen-Image-Edit 2509)
+
+	// RoleControlNet is a ControlNet the engine loads alongside the model.
+	// Unlike a LoRA, sd-server takes it only at launch (--control-net) and
+	// exposes no way to load or switch one over HTTP, so it is part of the
+	// installed model rather than a per-request choice. Attached explicitly at
+	// pull time; no architecture has a default.
+	RoleControlNet Role = "control_net" // ControlNet weights  -> --control-net
 )
 
 // Component is one weight file that makes up a model, addressed by content hash

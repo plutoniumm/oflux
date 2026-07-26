@@ -44,6 +44,8 @@ func FlagName(role types.Role) string {
 		return "--llm"
 	case types.RoleMMProj:
 		return "--llm_vision"
+	case types.RoleControlNet:
+		return "--control-net"
 	default:
 		return ""
 	}
@@ -74,7 +76,7 @@ type Arch struct {
 	// case for GGUF mirror repos like city96/FLUX.1-dev-gguf).
 	Keywords []string
 
-	Mode     types.Mode   // edit or generate
+	Mode     types.Mode   // edit, generate, or both (hybrid)
 	Required []types.Role // roles that MUST be present to launch
 	Optional []types.Role // roles that improve quality when present (e.g. mmproj)
 
@@ -144,13 +146,27 @@ func (a Arch) BaseFlags() []string {
 // starts with the correct cfg/flow-shift/steps for the model), plus the model
 // args and a copy of the defaults for reference. Component paths are resolved
 // later by the supervisor; per-request overrides are sent in the img_gen body.
-func (a Arch) EngineSpec() types.EngineSpec {
+func (a Arch) EngineSpec() types.EngineSpec { return a.EngineSpecWith(nil) }
+
+// EngineSpecWith is EngineSpec with per-model sampling defaults layered over the
+// architecture's own. A concrete checkpoint can need a different sampling regime
+// than its base architecture — a step-distilled merge wants 4 steps at cfg 1.0
+// where the base wants 20 at cfg 2.5 — and those values are baked into the
+// launch flags, so they have to be resolved before the engine starts.
+func (a Arch) EngineSpecWith(overrides map[string]any) types.EngineSpec {
+	defaults := cloneAny(a.Defaults)
+	if len(overrides) > 0 {
+		if defaults == nil {
+			defaults = make(map[string]any, len(overrides))
+		}
+		maps.Copy(defaults, overrides)
+	}
 	flags := a.BaseFlags()
-	flags = append(flags, samplingFlags(a.Defaults)...)
+	flags = append(flags, samplingFlags(defaults)...)
 	return types.EngineSpec{
 		Flags:     flags,
 		ModelArgs: cloneAny(a.ModelArgs),
-		Defaults:  cloneAny(a.Defaults),
+		Defaults:  defaults,
 	}
 }
 
@@ -233,7 +249,7 @@ func buildRegistry() []Arch {
 			Name:       "flux2",
 			ClassNames: []string{"Flux2Pipeline", "Flux2Transformer2DModel"},
 			Keywords:   []string{"flux.2", "flux2", "flux-2"},
-			Mode:       types.ModeGenerate,
+			Mode:       types.ModeBoth,
 			Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
 			Companions: map[types.Role]Companion{
 				// Comfy-Org ships the flux2 VAE and a purpose-built fp8 Mistral-3
@@ -243,6 +259,29 @@ func buildRegistry() []Arch {
 			},
 			switchFlags: []string{"--diffusion-fa"},
 			Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 28, "sample_method": "euler"},
+		},
+		{
+			// FLUX.2 klein is a distilled sibling of flux2-dev with a DIFFERENT
+			// text encoder: Qwen3 (4B for klein-4B, 8B for klein-9B), not
+			// Mistral-3. It is also few-step — docs/flux2.md uses --steps 4.
+			// Ground truth: docs/flux2.md, e.g.
+			//   --diffusion-model flux-2-klein-4b.safetensors \
+			//   --vae flux2_ae.safetensors --llm qwen_3_4b.safetensors \
+			//   --cfg-scale 1.0 --steps 4 --diffusion-fa
+			Name:       "flux2-klein",
+			ClassNames: []string{"Flux2KleinPipeline"},
+			Keywords:   []string{"flux.2-klein", "flux2-klein", "flux-2-klein"},
+			Mode:       types.ModeBoth,
+			Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
+			Companions: map[types.Role]Companion{
+				// Comfy-Org's klein repo is ungated; black-forest-labs/FLUX.2-dev
+				// (which docs/flux2.md links for the VAE) requires accepting a
+				// licence, so prefer the mirror.
+				types.RoleVAE: {Source: "Comfy-Org/flux2-klein", FilePattern: "split_files/vae/flux2-vae.safetensors"},
+				types.RoleLLM: {Source: "unsloth/Qwen3-4B-GGUF", FilePattern: "Qwen3-4B-{quant}.gguf", Quantized: true},
+			},
+			switchFlags: []string{"--diffusion-fa"},
+			Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 4, "sample_method": "euler"},
 		},
 		{
 			Name:       "flux-kontext",
@@ -275,7 +314,7 @@ func buildRegistry() []Arch {
 			Name:       "qwen-image-edit",
 			ClassNames: []string{"QwenImageEditPipeline", "QwenImageEditPlusPipeline"},
 			Keywords:   []string{"qwen-image-edit", "qwen_image_edit"},
-			Mode:       types.ModeEdit,
+			Mode:       types.ModeBoth,
 			Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
 			// NOTE: mmproj (--llm_vision) is only used by the 2509 variant. We ship
 			// 2511 (which uses --llm only), so mmproj is intentionally NOT listed as
@@ -283,6 +322,12 @@ func buildRegistry() []Arch {
 			// and the resolved component set. The companion below is kept (pinned to
 			// the fixed f16 projector, which is the only non-Q8_0 file that exists)
 			// so a future 2509 curated entry can opt back in.
+			//
+			// 2511 samples with a zero conditioning timestep (docs/qwen_image_edit.md).
+			// This belongs at the architecture level, not just on the curated model:
+			// every third-party 2511 derivative pulled by repo id needs it too, and
+			// the Rapid-AIO merges are exactly that.
+			ModelArgs: map[string]any{"qwen_image_zero_cond_t": true},
 			Companions: map[types.Role]Companion{
 				types.RoleVAE:    {Source: "Comfy-Org/Qwen-Image_ComfyUI", FilePattern: "split_files/vae/qwen_image_vae.safetensors"},
 				types.RoleLLM:    {Source: "mradermacher/Qwen2.5-VL-7B-Instruct-GGUF", FilePattern: "Qwen2.5-VL-7B-Instruct.{quant}.gguf", Quantized: true},
@@ -369,7 +414,7 @@ func MatchKeyword(haystack string) (Arch, bool) {
 	h := strings.ToLower(haystack)
 	// Order matters: specific before generic. flux2 precedes flux so "FLUX.2"
 	// repos never fall through to the FLUX.1 arch.
-	priority := []string{"flux-kontext", "flux2", "qwen-image-edit", "qwen-image", "z-image", "chroma", "flux", "sdxl"}
+	priority := []string{"flux-kontext", "flux2-klein", "flux2", "qwen-image-edit", "qwen-image", "z-image", "chroma", "flux", "sdxl"}
 	for _, name := range priority {
 		a, ok := ByName(name)
 		if !ok {

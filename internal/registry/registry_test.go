@@ -25,6 +25,7 @@ func TestNamesSorted(t *testing.T) {
 		"flux.1-kontext",
 		"flux.1-krea",
 		"flux.1-schnell",
+		"flux.2-klein",
 		"qwen-image",
 		"qwen-image-edit",
 		"z-image-turbo",
@@ -55,8 +56,13 @@ func TestResolveQwenImageEdit(t *testing.T) {
 	if !ok {
 		t.Fatal("Resolve(qwen-image-edit, Q8_0) not ok")
 	}
-	if m.Mode != types.ModeEdit {
-		t.Fatalf("Mode = %q, want %q", m.Mode, types.ModeEdit)
+	// Qwen-Image-Edit is a hybrid: the same weights edit with a reference image
+	// and generate from text alone. Marking it edit-only hid half of it.
+	if m.Mode != types.ModeBoth {
+		t.Fatalf("Mode = %q, want %q", m.Mode, types.ModeBoth)
+	}
+	if !m.Mode.CanEdit() || !m.Mode.CanGenerate() {
+		t.Fatalf("hybrid mode %q must allow both paths", m.Mode)
 	}
 	if m.Architecture != "qwen-image-edit" {
 		t.Fatalf("Architecture = %q, want qwen-image-edit", m.Architecture)
@@ -196,6 +202,42 @@ func TestResolveNoQuantLeftover(t *testing.T) {
 					t.Fatalf("%s@%s role %s Blob should be empty in template", name, q, c.Role)
 				}
 			}
+		}
+	}
+}
+
+// FLUX.2 klein uses Qwen3-4B as its text encoder, NOT the Mistral-3 encoder
+// that flux2-dev uses — getting these crossed would load the wrong weights.
+func TestResolveFlux2Klein(t *testing.T) {
+	m, ok := Resolve("flux.2-klein", "Q8_0")
+	if !ok {
+		t.Fatal("flux.2-klein should resolve")
+	}
+	// FLUX.2 is a hybrid — verified against the engine: klein generates from
+	// text and edits from a reference image with the same weights.
+	if m.Architecture != "flux2-klein" || m.Mode != types.ModeBoth {
+		t.Errorf("arch/mode = %s/%s", m.Architecture, m.Mode)
+	}
+	dif, _ := m.Component(types.RoleDiffusion)
+	if dif.Source != "leejet/FLUX.2-klein-4B-GGUF" || dif.File != "flux-2-klein-4b-Q8_0.gguf" {
+		t.Errorf("diffusion = %+v", dif)
+	}
+	llm, ok := m.Component(types.RoleLLM)
+	if !ok || llm.Source != "unsloth/Qwen3-4B-GGUF" || llm.File != "Qwen3-4B-Q8_0.gguf" {
+		t.Errorf("llm should be the Qwen3-4B encoder, got %+v", llm)
+	}
+	if strings.Contains(strings.ToLower(llm.File), "mistral") {
+		t.Error("klein must not use the flux2-dev Mistral encoder")
+	}
+	vae, _ := m.Component(types.RoleVAE)
+	if vae.Source != "Comfy-Org/flux2-klein" {
+		t.Errorf("vae should come from the ungated mirror, got %+v", vae)
+	}
+	// klein is few-step; the engine should launch with those defaults baked in.
+	joined := strings.Join(m.Engine.Flags, " ")
+	for _, want := range []string{"--steps 4", "--cfg-scale 1", "--diffusion-fa"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("engine flags %q missing %q", joined, want)
 		}
 	}
 }

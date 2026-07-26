@@ -308,7 +308,10 @@ func TestRemoveManifestGC(t *testing.T) {
 	}
 
 	// Remove A: uniqA should be freed, shared kept (B still references it).
-	freed, err := s.RemoveManifest("A")
+	freed, collected, err := s.RemoveManifest("A")
+	if !collected {
+		t.Fatal("GC should run when no pull holds the store")
+	}
 	if err != nil {
 		t.Fatalf("RemoveManifest(A): %v", err)
 	}
@@ -330,7 +333,7 @@ func TestRemoveManifestGC(t *testing.T) {
 	}
 
 	// Remove B: now shared + uniqB freed.
-	freed, err = s.RemoveManifest("B")
+	freed, _, err = s.RemoveManifest("B")
 	if err != nil {
 		t.Fatalf("RemoveManifest(B): %v", err)
 	}

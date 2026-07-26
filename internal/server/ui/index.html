@@ -183,6 +183,29 @@
   .run:active:not(:disabled) { transform: translateY(1px); }
   .run:disabled { opacity: .45; cursor: default; }
 
+  /* LoRA toggles. An adapter is a per-request modifier, not a mode, so it
+     reads as a row of switches rather than another dropdown. */
+  .adapters { display: flex; flex-wrap: wrap; gap: 6px; }
+  .adapter {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 5px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: var(--muzzle);
+    color: var(--snout);
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .adapter:hover { border-color: var(--pelt); }
+  .adapter[aria-pressed="true"] {
+    background: var(--pelt);
+    border-color: var(--ember);
+    color: var(--shade);
+  }
+  .adapter .steps { opacity: .65; margin-left: 5px; }
+  .adapter:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+
   .note {
     margin-top: 10px;
     font-family: var(--mono);
@@ -306,7 +329,7 @@
     </div>
 
     <div class="field" id="imageField" hidden>
-      <label class="label" for="drop">Image to edit</label>
+      <label class="label" for="drop" id="imageLabel">Image to edit</label>
       <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose an image to edit">
         Drop an image, paste, or <b>browse</b>
       </div>
@@ -317,6 +340,11 @@
     <div class="field">
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" placeholder="Describe the change you want."></textarea>
+    </div>
+
+    <div class="field" id="loraField" hidden>
+      <span class="label">Adapters</span>
+      <div class="adapters" id="loras"></div>
     </div>
 
     <details class="more">
@@ -365,17 +393,24 @@
     model: $("model"), prompt: $("prompt"), negative: $("negative"),
     steps: $("steps"), seed: $("seed"), run: $("run"), note: $("note"),
     form: $("form"), drop: $("drop"), file: $("file"), clear: $("clear"),
-    imageField: $("imageField"), plate: $("plate"), empty: $("empty"),
+    imageField: $("imageField"), imageLabel: $("imageLabel"),
+    plate: $("plate"), empty: $("empty"),
     readout: $("readout"), meta: $("meta"), save: $("save"), reuse: $("reuse"),
     dot: $("dot"), statusText: $("statusText"),
+    loraField: $("loraField"), loras: $("loras"),
   };
 
   let models = [];
+  let loras = [];            // installed adapters
+  const picked = new Set();  // adapter names enabled for the next run
   let inputDataURL = null;   // the image being edited
   let busy = false;
 
   const currentModel = () => models.find((m) => m.name === els.model.value);
-  const isEdit = () => currentModel()?.mode === "edit";
+  // A hybrid model ("both") edits when given an image and generates when not,
+  // so the form follows the image field rather than the model's mode alone.
+  const canEdit = () => ["edit", "both"].includes(currentModel()?.mode);
+  const isEdit = () => canEdit() && (currentModel()?.mode !== "both" || !!inputDataURL);
 
   function say(msg, bad) {
     els.note.textContent = msg || "";
@@ -418,19 +453,67 @@
   // The edit/generate split is real in the engine, so the form reflects it:
   // a generate-only model retires the image input rather than lying about it.
   function syncMode() {
+    const hybrid = currentModel()?.mode === "both";
     const edit = isEdit();
-    els.imageField.hidden = !edit;
+    els.imageField.hidden = !canEdit();
+    els.imageLabel.textContent = hybrid ? "Image to edit (optional)" : "Image to edit";
     els.run.textContent = edit ? "Edit image" : "Generate image";
     els.prompt.placeholder = edit
       ? "Describe the change you want."
       : "Describe the image you want.";
     if (!edit) say("");
+    syncLoras();
+  }
+
+  // ---- adapters --------------------------------------------------------
+
+  async function loadLoras() {
+    try {
+      const r = await fetch("/api/loras");
+      loras = ((await r.json()).loras || []).filter((l) => l.installed);
+    } catch { loras = []; }
+  }
+
+  // An adapter trained for another architecture will not apply, so only offer
+  // the ones that fit the selected model. Adapters pulled from an arbitrary
+  // repo declare no architecture and are always offered.
+  const fitsModel = (l, arch) => !l.archs || !l.archs.length || l.archs.includes(arch);
+
+  function syncLoras() {
+    const arch = currentModel()?.architecture;
+    const usable = arch ? loras.filter((l) => fitsModel(l, arch)) : [];
+    els.loraField.hidden = usable.length === 0;
+    if (!usable.length) { picked.clear(); return; }
+
+    // Drop selections that no longer fit the newly-chosen model.
+    for (const name of [...picked]) {
+      if (!usable.some((l) => l.name === name)) picked.delete(name);
+    }
+
+    els.loras.innerHTML = "";
+    for (const l of usable) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "adapter";
+      b.setAttribute("aria-pressed", String(picked.has(l.name)));
+      b.innerHTML = l.steps
+        ? `${l.name}<span class="steps">${l.steps} steps</span>`
+        : l.name;
+      if (l.description) b.title = l.description;
+      b.onclick = () => {
+        picked.has(l.name) ? picked.delete(l.name) : picked.add(l.name);
+        b.setAttribute("aria-pressed", String(picked.has(l.name)));
+      };
+      els.loras.appendChild(b);
+    }
   }
 
   // ---- image input -----------------------------------------------------
 
   function setInput(dataURL) {
     inputDataURL = dataURL;
+    // On a hybrid, adding or clearing the image switches which endpoint runs.
+    setTimeout(() => { if (currentModel()?.mode === "both") syncMode(); }, 0);
     if (!dataURL) {
       els.drop.classList.remove("has");
       els.drop.innerHTML = "Drop an image, paste, or <b>browse</b>";
@@ -506,6 +589,7 @@
     if (els.negative.value.trim()) body.negative_prompt = els.negative.value.trim();
     if (els.steps.value) body.steps = Number(els.steps.value);
     if (els.seed.value) body.seed = Number(els.seed.value);
+    if (picked.size) body.loras = [...picked].map((name) => ({ name }));
 
     busy = true;
     els.run.disabled = true;
@@ -559,7 +643,7 @@
     }
   });
 
-  loadModels();
+  loadLoras().then(loadModels);
 })();
 </script>
 </body>

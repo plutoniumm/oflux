@@ -64,7 +64,7 @@ func buildCurated() []Model {
 		{
 			Name:        "qwen-image-edit",
 			Arch:        "qwen-image-edit",
-			Mode:        types.ModeEdit,
+			Mode:        types.ModeBoth,
 			DiffSource:  "unsloth/Qwen-Image-Edit-2511-GGUF",
 			DiffPattern: "qwen-image-edit-2511-{quant}.gguf",
 			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"},
@@ -87,6 +87,18 @@ func buildCurated() []Model {
 		},
 
 		// ---- GENERATION models -----------------------------------------------
+		{
+			Name:       "flux.2-klein",
+			Arch:       "flux2-klein",
+			Mode:       types.ModeBoth,
+			DiffSource: "leejet/FLUX.2-klein-4B-GGUF", // sd.cpp author's own conversion
+			// The 4B klein; the repo ships Q8_0 (4.30 GB) and Q4_0 (2.46 GB) only.
+			DiffPattern: "flux-2-klein-4b-{quant}.gguf",
+			// Intersected with the Qwen3-4B encoder repo's labels so every listed
+			// quant resolves a real file for both components.
+			Quants:      []string{"Q8_0", "Q4_0"},
+			Description: "FLUX.2 klein 4B - few-step text-to-image (Qwen3-4B encoder).",
+		},
 		{
 			Name:        "z-image-turbo",
 			Arch:        "z-image",

@@ -141,7 +141,7 @@ func TestInspect_QwenImageEditDiffusers(t *testing.T) {
 	if !v.Compatible {
 		t.Fatalf("expected compatible, got blockers: %+v", v.Blockers)
 	}
-	if v.Manifest.Mode != types.ModeEdit {
+	if !v.Manifest.Mode.CanEdit() {
 		t.Errorf("mode = %q, want edit", v.Manifest.Mode)
 	}
 	if v.Manifest.Architecture != "qwen-image-edit" {

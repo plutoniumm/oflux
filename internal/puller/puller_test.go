@@ -63,21 +63,21 @@ func newPuller(t *testing.T, hub *httptest.Server) *Puller {
 
 func TestResolveCurated(t *testing.T) {
 	p := newPuller(t, fakeHub(nil))
-	v, err := p.Resolve(context.Background(), "qwen-image-edit", "Q8_0")
+	v, err := p.Resolve(context.Background(), "qwen-image-edit", "Q8_0", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !v.Compatible || v.Manifest == nil {
 		t.Fatalf("expected compatible curated resolve, got %+v", v)
 	}
-	if v.Manifest.Mode != types.ModeEdit || v.Manifest.Architecture != "qwen-image-edit" {
+	if !v.Manifest.Mode.CanEdit() || v.Manifest.Architecture != "qwen-image-edit" {
 		t.Errorf("manifest = %+v", v.Manifest)
 	}
 }
 
 func TestResolveUnknown(t *testing.T) {
 	p := newPuller(t, fakeHub(nil))
-	if _, err := p.Resolve(context.Background(), "not-a-real-model", ""); err == nil {
+	if _, err := p.Resolve(context.Background(), "not-a-real-model", "", ""); err == nil {
 		t.Fatal("expected error for unknown bare name")
 	}
 }
@@ -92,7 +92,7 @@ func TestPullFluxRepoEndToEnd(t *testing.T) {
 	hub := fakeHub(repos)
 	p := newPuller(t, hub)
 
-	m, err := p.Pull(context.Background(), "city96/FLUX.1-dev-gguf", "Q8_0", nil)
+	m, err := p.Pull(context.Background(), "city96/FLUX.1-dev-gguf", "Q8_0", Opts{}, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestPullIncompatibleRepo(t *testing.T) {
 		"someorg/mystery-model": {"model_index.json": []byte(`{"_class_name":"TotallyUnknownPipeline"}`)},
 	}
 	p := newPuller(t, fakeHub(repos))
-	_, err := p.Pull(context.Background(), "someorg/mystery-model", "Q8_0", nil)
+	_, err := p.Pull(context.Background(), "someorg/mystery-model", "Q8_0", Opts{}, nil)
 	if err == nil {
 		t.Fatal("expected incompatibility error")
 	}

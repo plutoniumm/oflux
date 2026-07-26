@@ -79,21 +79,40 @@ func IsCurated(name string) bool {
 // WITHOUT downloading anything. Curated names go through the registry; anything
 // containing a "/" is treated as a Hugging Face repo and inspected for
 // compatibility; otherwise it is an error.
-func (p *Puller) Resolve(ctx context.Context, nameOrRepo, quant string) (types.Verdict, error) {
+//
+// file pins the exact diffusion weights within a repo, for repos that publish
+// many builds; it is not meaningful for curated models, which pin their own.
+func (p *Puller) Resolve(ctx context.Context, nameOrRepo, quant, file string) (types.Verdict, error) {
 	if m, ok := registry.Resolve(nameOrRepo, quant); ok {
+		if file != "" {
+			return types.Verdict{}, fmt.Errorf("%s is a curated model and already pins its weights; --file only applies to a Hugging Face repo", nameOrRepo)
+		}
 		return types.Verdict{Repo: nameOrRepo, Compatible: true, Manifest: &m}, nil
 	}
 	if strings.Contains(nameOrRepo, "/") {
-		return compat.Inspect(ctx, p.hf, nameOrRepo, quantPref(quant))
+		return compat.InspectFile(ctx, p.hf, nameOrRepo, quantPref(quant), file)
 	}
 	return types.Verdict{}, fmt.Errorf("unknown model %q; pass a Hugging Face repo as org/name to inspect it", nameOrRepo)
+}
+
+// Opts carries the optional knobs for a pull.
+type Opts struct {
+	// File pins the exact diffusion weights within a multi-build repo.
+	File string
+	// ControlNet is a Hugging Face repo whose weights are attached to the
+	// installed model and loaded with it; ControlNetFile pins one of several.
+	ControlNet     string
+	ControlNetFile string
+	// As installs under this name instead of the derived one. Useful when the
+	// same base model is installed more than once with different attachments.
+	As string
 }
 
 // Pull resolves nameOrRepo, downloads every component (skipping blobs already
 // present), writes the manifest, and returns it. An incompatible repo yields a
 // descriptive error listing the blockers.
-func (p *Puller) Pull(ctx context.Context, nameOrRepo, quant string, prog Progress) (types.Manifest, error) {
-	v, err := p.Resolve(ctx, nameOrRepo, quant)
+func (p *Puller) Pull(ctx context.Context, nameOrRepo, quant string, opts Opts, prog Progress) (types.Manifest, error) {
+	v, err := p.Resolve(ctx, nameOrRepo, quant, opts.File)
 	if err != nil {
 		return types.Manifest{}, err
 	}
@@ -101,6 +120,18 @@ func (p *Puller) Pull(ctx context.Context, nameOrRepo, quant string, prog Progre
 		return types.Manifest{}, blockerError(nameOrRepo, v)
 	}
 	m := *v.Manifest
+
+	if opts.ControlNet != "" {
+		if err := compat.AttachControlNet(ctx, p.hf, &m, opts.ControlNet, opts.ControlNetFile); err != nil {
+			return types.Manifest{}, err
+		}
+	}
+	if opts.As != "" {
+		if err := store.ValidModelName(opts.As); err != nil {
+			return types.Manifest{}, err
+		}
+		m.Name = opts.As
+	}
 
 	release, err := p.claim(m.Name)
 	if err != nil {

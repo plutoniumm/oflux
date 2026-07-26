@@ -62,6 +62,7 @@ func Setup() (*App, error) {
 		MaxLoaded:  cfg.MaxLoaded,
 		LogDir:     st.LogsDir(),
 		BlobPath:   st.BlobPath,
+		LoraDir:    st.LorasDir(),
 		// Large diffusion checkpoints (12-20B) take minutes to load into Metal;
 		// give the startup health-probe generous headroom before giving up.
 		StartTimeout: 10 * time.Minute,
@@ -87,6 +88,9 @@ func (a *App) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("oflux is already running on port %d (%w)", a.Cfg.Port, err)
 	}
+	// Announce only once the port is actually ours. Printing before the bind
+	// claimed to be serving and then failed on the next line.
+	fmt.Printf("oflux serving on http://%s\n", a.Addr())
 
 	// Reap any sd-server orphaned by a previously-killed daemon: it does not die
 	// with its parent, and stale engines hold ports and many GB of memory.
@@ -164,21 +168,47 @@ func (a *App) reapOrphanEngines() {
 
 // ResolveEnginePath locates the bundled sd-server binary: $OFLUX_ENGINE, then
 // next to the executable (including the .app Resources dir), then $PATH.
+//
+// The executable path is resolved through symlinks first. `oflux` on the user's
+// PATH is a symlink into oflux.app/Contents/MacOS/, and os.Executable() returns
+// that symlink — so searching relative to it looks beside the symlink (e.g.
+// /opt/homebrew/bin) and never finds Contents/Resources/sd-server. The symptom
+// is `oflux serve` warning that the engine is missing while the menu-bar app,
+// launched directly from the bundle, works fine.
 func ResolveEnginePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = ""
+	}
+	return resolveEngineFrom(exe)
+}
+
+// resolveEngineFrom is ResolveEnginePath with the executable path injected, so
+// the bundle/symlink layouts can be tested without reinstalling the app.
+func resolveEngineFrom(exe string) (string, error) {
 	if p := os.Getenv("OFLUX_ENGINE"); p != "" {
 		if isExec(p) {
 			return p, nil
 		}
 		return "", fmt.Errorf("OFLUX_ENGINE=%s is not an executable", p)
 	}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		for _, cand := range []string{
-			filepath.Join(dir, "sd-server"),
-			filepath.Join(dir, "..", "Resources", "sd-server"),
-		} {
-			if isExec(cand) {
-				return cand, nil
+	if exe != "" {
+		dirs := []string{filepath.Dir(exe)}
+		// Search beside the real binary too, but keep the symlink's own
+		// directory first so a side-by-side dev build still wins.
+		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			if d := filepath.Dir(resolved); d != dirs[0] {
+				dirs = append(dirs, d)
+			}
+		}
+		for _, dir := range dirs {
+			for _, cand := range []string{
+				filepath.Join(dir, "sd-server"),
+				filepath.Join(dir, "..", "Resources", "sd-server"),
+			} {
+				if isExec(cand) {
+					return cand, nil
+				}
 			}
 		}
 	}

@@ -13,8 +13,10 @@ package compat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"oflux/internal/archdb"
@@ -57,6 +59,17 @@ var roleKeywords = map[types.Role][]string{
 // populated with Components carrying Source+File (Blob empty until downloaded)
 // and a full Engine spec.
 func Inspect(ctx context.Context, f RepoFetcher, repo string, quantPref []string) (types.Verdict, error) {
+	return InspectFile(ctx, f, repo, quantPref, "")
+}
+
+// InspectFile is Inspect with the diffusion weights pinned to a specific file in
+// the repo, bypassing quant selection.
+//
+// Some repos publish dozens of builds — many revisions of the same model, SFW
+// and NSFW cuts, several quants of each — and picking by quant preference alone
+// resolves to whichever build happens to sort first, which is rarely the one the
+// user wanted. Naming the file removes the guess.
+func InspectFile(ctx context.Context, f RepoFetcher, repo string, quantPref []string, wantFile string) (types.Verdict, error) {
 	files, err := f.Tree(ctx, repo, "")
 	if err != nil {
 		return types.Verdict{}, err
@@ -84,6 +97,30 @@ func Inspect(ctx context.Context, f RepoFetcher, repo string, quantPref []string
 			ggufFiles = append(ggufFiles, c)
 		}
 	}
+
+	if wantFile != "" {
+		chosen, ok := matchFile(files, wantFile)
+		if !ok {
+			return types.Verdict{
+				Repo:       repo,
+				Compatible: false,
+				Blockers: []types.Blocker{{
+					Kind:   types.BlockerMissingRole,
+					Role:   types.RoleDiffusion,
+					Detail: fmt.Sprintf("no file %q in %s", wantFile, repo),
+				}},
+			}, nil
+		}
+		// SelectQuant returns (file, quant, ok) — take the LABEL, not the path.
+		// The label is reused to resolve quantized companions, so a path here
+		// builds encoder filenames that cannot exist.
+		_, quant, ok := SelectQuant([]string{chosen}, allQuantLabels)
+		if !ok {
+			quant = "unknown"
+		}
+		return buildVerdict(ctx, f, repo, arch, files, chosen, quant)
+	}
+
 	chosen, quant, qok := SelectQuant(ggufFiles, quantPref)
 	if !qok {
 		if len(diffFiles) > 0 {
@@ -110,11 +147,23 @@ func Inspect(ctx context.Context, f RepoFetcher, repo string, quantPref []string
 		}, nil
 	}
 
+	return buildVerdict(ctx, f, repo, arch, files, chosen, quant)
+}
+
+// buildVerdict resolves the shared components around an already-chosen
+// diffusion file and assembles the manifest.
+func buildVerdict(ctx context.Context, f RepoFetcher, repo string, arch archdb.Arch, files []types.HFFile, chosen, quant string) (types.Verdict, error) {
 	// Resolve quantized companions at the quant we actually matched for the
 	// diffusion weights. Using quantPref[0] instead would, whenever the repo
 	// lacks the top preference, request an encoder quant that may not exist in
 	// its own repo — a 404 that only surfaces after the multi-GB DiT download.
-	companionQuant := quant
+	//
+	// The label still has to exist in the COMPANION's repo, and quant vocabulary
+	// differs between publishers: a diffusion repo may ship "Q4_K" where the
+	// encoder repo only has "Q4_K_M"/"Q4_K_S". companionFile checks the
+	// companion's tree and walks a fallback chain rather than 404ing after the
+	// multi-gigabyte diffusion download has already completed.
+	trees := map[string][]types.HFFile{}
 
 	resolveRole := func(role types.Role) (types.Component, bool) {
 		if role == types.RoleDiffusion {
@@ -124,11 +173,11 @@ func Inspect(ctx context.Context, f RepoFetcher, repo string, quantPref []string
 			return types.Component{Role: role, File: inrepo, Source: repo}, true
 		}
 		if comp, ok := arch.Companions[role]; ok {
-			file := comp.FilePattern
-			if comp.Quantized {
-				file = strings.ReplaceAll(file, "{quant}", companionQuant)
-			}
-			return types.Component{Role: role, File: file, Source: comp.Source}, true
+			return types.Component{
+				Role:   role,
+				File:   companionFile(ctx, f, trees, comp, quant),
+				Source: comp.Source,
+			}, true
 		}
 		return types.Component{}, false
 	}
@@ -157,17 +206,26 @@ func Inspect(ctx context.Context, f RepoFetcher, repo string, quantPref []string
 		return types.Verdict{Repo: repo, Compatible: false, Blockers: blockers}, nil
 	}
 
+	notes := []string{"quant: " + quant}
+	if isUnquantizedLabel(quant) {
+		notes = append(notes, "diffusion weights are unquantized ("+quant+")")
+	}
+
+	// A step-distilled checkpoint samples nothing like its base architecture, and
+	// those defaults are baked into the launch flags, so they have to be decided
+	// here rather than per request.
+	overrides, note := fewStepDefaults(chosen)
+	if note != "" {
+		notes = append(notes, note)
+	}
+
 	m := types.Manifest{
 		Name:         deriveName(repo),
 		Architecture: arch.Name,
 		Mode:         arch.Mode,
 		Components:   components,
-		// EngineSpec() already carries this arch's ModelArgs and Defaults.
-		Engine: arch.EngineSpec(),
-	}
-	notes := []string{"quant: " + quant}
-	if isUnquantizedLabel(quant) {
-		notes = append(notes, "diffusion weights are unquantized ("+quant+")")
+		// EngineSpecWith() already carries this arch's ModelArgs and Defaults.
+		Engine: arch.EngineSpecWith(overrides),
 	}
 	return types.Verdict{
 		Repo:       repo,
@@ -175,6 +233,158 @@ func Inspect(ctx context.Context, f RepoFetcher, repo string, quantPref []string
 		Manifest:   &m,
 		Notes:      notes,
 	}, nil
+}
+
+// allQuantLabels is every quant label we can recognize in a filename, ordered
+// most- to least-specific so "Q4_K_M" is never reported as the "Q4_K" it
+// contains. Used to label a file the caller pinned by name.
+var allQuantLabels = []string{
+	"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_K", "Q5_0", "Q5_1",
+	"Q4_K_M", "Q4_K_S", "Q4_K", "Q4_0", "Q4_1",
+	"Q3_K_M", "Q3_K_S", "Q3_K", "Q2_K",
+	"BF16", "F16", "FP16", "F32", "FP32",
+}
+
+// companionFile resolves a companion's filename at the best quant its own repo
+// actually publishes, starting from the quant matched for the diffusion weights.
+//
+// If the companion is not quantized, or its tree cannot be read, it falls back
+// to a straight substitution — the previous behaviour, which is right whenever
+// the two publishers happen to agree on labels.
+func companionFile(ctx context.Context, f RepoFetcher, trees map[string][]types.HFFile, comp archdb.Companion, quant string) string {
+	if !comp.Quantized {
+		return comp.FilePattern
+	}
+	sub := func(q string) string { return strings.ReplaceAll(comp.FilePattern, "{quant}", q) }
+
+	files, cached := trees[comp.Source]
+	if !cached {
+		got, err := f.Tree(ctx, comp.Source, "")
+		if err != nil {
+			trees[comp.Source] = nil // remember the failure; don't refetch per role
+			return sub(quant)
+		}
+		files, trees[comp.Source] = got, got
+	}
+	if files == nil {
+		return sub(quant)
+	}
+	have := make(map[string]bool, len(files))
+	for _, fl := range files {
+		have[strings.ToLower(fl.Path)] = true
+		have[strings.ToLower(path.Base(fl.Path))] = true
+	}
+	for _, q := range quantFallbacks(quant) {
+		if have[strings.ToLower(sub(q))] {
+			return sub(q)
+		}
+	}
+	return sub(quant)
+}
+
+// quantFallbacks orders the quant labels to try for a companion, given the one
+// matched for the diffusion weights: the exact label first, then its
+// nearest-precision siblings, then a general descending-quality chain.
+//
+// Publishers disagree on granularity — "Q4_K" from one is "Q4_K_M"/"Q4_K_S"
+// from another — so a companion has to be allowed to differ slightly from the
+// diffusion weights rather than fail outright.
+func quantFallbacks(quant string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(q string) {
+		if q == "" || seen[q] {
+			return
+		}
+		seen[q] = true
+		out = append(out, q)
+	}
+	add(quant)
+	// A bare K-quant ("Q4_K") may be published only in sized variants, and vice
+	// versa. Prefer medium over small: closer to the requested precision.
+	if base, ok := strings.CutSuffix(quant, "_M"); ok {
+		add(base)
+		add(base + "_S")
+		add(base + "_L")
+	} else if base, ok := strings.CutSuffix(quant, "_S"); ok {
+		add(base)
+		add(base + "_M")
+		add(base + "_L")
+	} else if base, ok := strings.CutSuffix(quant, "_L"); ok {
+		add(base)
+		add(base + "_M")
+		add(base + "_S")
+	} else {
+		add(quant + "_M")
+		add(quant + "_S")
+		add(quant + "_L")
+	}
+	for _, q := range []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_0"} {
+		add(q)
+	}
+	return out
+}
+
+// matchFile resolves a caller-supplied file against the repo tree, accepting
+// either the full path or a bare basename.
+func matchFile(files []types.HFFile, want string) (string, bool) {
+	for _, f := range files {
+		if f.Path == want {
+			return f.Path, true
+		}
+	}
+	for _, f := range files {
+		if path.Base(f.Path) == want {
+			return f.Path, true
+		}
+	}
+	return "", false
+}
+
+// stepCountRe matches an explicit step count in a filename, e.g.
+// "Lightning-4steps-V1.0" or "hyper-8step-lora".
+var stepCountRe = regexp.MustCompile(`(?i)(?:^|[^0-9a-z])(\d{1,2})[-_ ]?steps?(?:$|[^0-9a-z])`)
+
+// fewStepFamilies are checkpoint families that always ship a step-distillation
+// adapter merged in, with the step count they are documented to run at. These
+// are recognized only when the filename carries no explicit count of its own.
+//
+//   - "rapid" is Phr00t's Qwen-Image-Edit-Rapid-AIO line, documented as "1 CFG,
+//     4 step" — its GGUF conversions keep the name but carry no step count.
+//   - "lightning" is lightx2v's distillation line, whose 4-step build is the
+//     common one.
+var fewStepFamilies = map[string]int{"rapid": 4, "lightning": 4}
+
+// fewStepDefaults reports the sampling defaults a step-distilled checkpoint
+// needs, plus a note explaining the override. It returns nil for ordinary
+// weights.
+//
+// Getting this wrong is not subtle: a 4-step merge sampled at its base
+// architecture's 20 steps and cfg 2.5 returns burnt, over-saturated images, and
+// nothing in the pull output would explain why. Callers can still override
+// steps and cfg per request.
+func fewStepDefaults(file string) (map[string]any, string) {
+	base := strings.ToLower(path.Base(file))
+	steps := 0
+	if m := stepCountRe.FindStringSubmatch(base); m != nil {
+		n, err := strconv.Atoi(m[1])
+		if err == nil && n > 0 && n <= 16 {
+			steps = n
+		}
+	}
+	if steps == 0 {
+		for family, n := range fewStepFamilies {
+			if strings.Contains(base, family) {
+				steps = n
+				break
+			}
+		}
+	}
+	if steps == 0 {
+		return nil, ""
+	}
+	return map[string]any{"cfg_scale": 1.0, "steps": steps},
+		fmt.Sprintf("looks step-distilled: defaulting to %d steps at cfg 1.0 (override per request with \"steps\"/\"cfg\")", steps)
 }
 
 // SelectQuant picks the best filename from candidates given the preference

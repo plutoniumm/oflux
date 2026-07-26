@@ -65,7 +65,7 @@ func Open(root string) (*Store, error) {
 		}
 	}
 	s := &Store{root: root}
-	for _, dir := range []string{s.root, s.BlobsDir(), s.ManifestsDir(), s.LogsDir()} {
+	for _, dir := range []string{s.root, s.BlobsDir(), s.ManifestsDir(), s.LogsDir(), s.LorasDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("store: create %s: %w", dir, err)
 		}
@@ -84,6 +84,13 @@ func (s *Store) ManifestsDir() string { return filepath.Join(s.root, "manifests"
 
 // LogsDir returns the directory for daemon and engine logs.
 func (s *Store) LogsDir() string { return filepath.Join(s.root, "logs") }
+
+// LorasDir returns the directory holding installed LoRA adapters.
+//
+// LoRAs are stored under their friendly name rather than content-addressed like
+// weights: the engine is handed this directory as --lora-model-dir and resolves
+// each request's LoRA by filename, so the name on disk IS the API identifier.
+func (s *Store) LorasDir() string { return filepath.Join(s.root, "loras") }
 
 // BlobName converts a hex sha256 (optionally already prefixed with "sha256:"
 // or "sha256-") into the on-disk blob filename "sha256-<hex>".
@@ -187,14 +194,23 @@ func copyFile(src, dst string) (err error) {
 	return out.Sync()
 }
 
+// ValidModelName reports whether name is usable as a manifest name, explaining
+// why if not. A manifest name becomes a path segment under manifests/.
+func ValidModelName(name string) error {
+	if name == "" {
+		return errors.New("store: empty manifest name")
+	}
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return fmt.Errorf("store: invalid manifest name %q", name)
+	}
+	return nil
+}
+
 // manifestPath returns the on-disk path for a manifest name, rejecting names
 // that contain path separators or "..".
 func (s *Store) manifestPath(name string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("store: empty manifest name")
-	}
-	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		return "", fmt.Errorf("store: invalid manifest name %q", name)
+	if err := ValidModelName(name); err != nil {
+		return "", err
 	}
 	return filepath.Join(s.ManifestsDir(), name+".json"), nil
 }
@@ -273,26 +289,44 @@ func (s *Store) ListManifests() ([]types.Manifest, error) {
 	return out, nil
 }
 
-// RemoveManifest deletes the named manifest and then garbage-collects any
-// blobs that no remaining manifest references. It returns the freed blob names.
-func (s *Store) RemoveManifest(name string) ([]string, error) {
+// RemoveManifest deletes the named manifest and then garbage-collects any blobs
+// that no remaining manifest references. It returns the freed blob names and
+// whether collection actually ran.
+//
+// Collection is skipped rather than waited for when a pull is in flight. GC has
+// to exclude in-progress downloads, and a multi-gigabyte pull holds that lock
+// for many minutes — so blocking here hung `oflux rm` long after the manifest
+// itself was gone, with nothing on screen to explain why. Blobs orphaned by the
+// skip are collected by the next removal or GC.
+func (s *Store) RemoveManifest(name string) (freed []string, collected bool, err error) {
 	path, err := s.manifestPath(name)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// Confirm the manifest set is readable BEFORE deleting anything: if some
 	// other manifest is unparsable, GC would fail and we'd have deleted this
 	// one with its blobs left orphaned and un-collectable.
 	if _, err := s.referencedBlobs(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%q: %w", name, ErrManifestNotFound)
+			return nil, false, fmt.Errorf("%q: %w", name, ErrManifestNotFound)
 		}
-		return nil, fmt.Errorf("store: remove manifest %q: %w", name, err)
+		return nil, false, fmt.Errorf("store: remove manifest %q: %w", name, err)
 	}
-	return s.GC()
+	return s.TryGC()
+}
+
+// TryGC runs garbage collection only if no pull currently holds the store,
+// reporting collected=false when it backed off instead of waiting.
+func (s *Store) TryGC() (freed []string, collected bool, err error) {
+	if !s.gcMu.TryLock() {
+		return nil, false, nil
+	}
+	defer s.gcMu.Unlock()
+	freed, err = s.gcLocked()
+	return freed, true, err
 }
 
 // referencedBlobs returns the set of blob names referenced by any installed
@@ -315,12 +349,17 @@ func (s *Store) referencedBlobs() (map[string]bool, error) {
 }
 
 // GC removes any blob not referenced by an installed manifest and returns the
-// freed blob names, sorted.
+// freed blob names, sorted. It waits for any in-progress pull to finish; use
+// TryGC to back off instead of waiting.
 func (s *Store) GC() ([]string, error) {
 	// Wait for any in-progress pull to commit its manifest first.
 	s.gcMu.Lock()
 	defer s.gcMu.Unlock()
+	return s.gcLocked()
+}
 
+// gcLocked is GC with s.gcMu already held.
+func (s *Store) gcLocked() ([]string, error) {
 	referenced, err := s.referencedBlobs()
 	if err != nil {
 		return nil, err

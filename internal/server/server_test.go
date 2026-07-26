@@ -107,7 +107,10 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sup := supervisor.New(supervisor.Options{})
+	// LogDir must be set: the supervisor creates <model>.log before it execs,
+	// so an empty LogDir drops engine logs into the package directory whenever
+	// a test reaches a spawn.
+	sup := supervisor.New(supervisor.Options{LogDir: t.TempDir()})
 	pl := puller.New(hfclient.New(""), st)
 	return New(st, sup, pl, types.DefaultConfig()), st
 }

@@ -32,11 +32,25 @@ type SampleParams struct {
 	Guidance     *Guidance `json:"guidance,omitempty"`
 }
 
+// Lora is one LoRA to apply to a generation. Path is resolved relative to the
+// engine's --lora-model-dir and must include the file extension.
+//
+// The engine deliberately does NOT parse "<lora:name:scale>" tags out of the
+// prompt (verified against sd-server: such a tag is tokenized as literal prompt
+// text). Structured entries here are the only way to apply a LoRA over HTTP.
+type Lora struct {
+	Path       string  `json:"path"`
+	Multiplier float64 `json:"multiplier"`
+}
+
 // ImgGenRequest is the body of POST /sdcpp/v1/img_gen. All base64-image fields
 // carry raw base64 (no data: prefix), matching the sd-server native API.
 type ImgGenRequest struct {
 	Prompt         string `json:"prompt"`
 	NegativePrompt string `json:"negative_prompt,omitempty"`
+
+	// Loras marshals to "lora" (singular), the engine's field name.
+	Loras []Lora `json:"lora,omitempty"`
 
 	Width  *int `json:"width,omitempty"`
 	Height *int `json:"height,omitempty"`

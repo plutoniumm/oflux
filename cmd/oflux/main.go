@@ -70,6 +70,8 @@ func main() {
 		err = cmdPS(args)
 	case "rm", "delete":
 		err = cmdRm(args)
+	case "lora", "loras":
+		err = cmdLora(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -83,8 +85,9 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `oflux — local diffusion image-editing daemon
+func usage() { fmt.Fprint(os.Stderr, usageText) }
+
+const usageText = `oflux — local diffusion image-editing daemon
 
 Usage:
   oflux menubar                   run the macOS menu-bar app (hosts the daemon)
@@ -92,16 +95,29 @@ Usage:
   oflux install / uninstall       add/remove the login agent + CLI symlink
   oflux update                    update to the latest GitHub release
   oflux version                   print the version
-  oflux pull <name|org/repo>      install a model (curated name or Hugging Face repo)
+  oflux pull <name|org/repo>...   install models (curated names or Hugging Face repos)
   oflux run  <name>               install if needed, then print how to call it
   oflux list                      list installed models
   oflux ps                        show currently-loaded models
-  oflux rm   <name>               remove an installed model
+  oflux rm   <name>...            remove installed models
+
+  oflux lora ls                   list LoRA adapters (installed and available)
+  oflux lora pull <name|org/repo> install a LoRA adapter
+  oflux lora rm   <name>...       remove LoRA adapters
 
 Flags:
   pull/run: --quant <Q8_0|Q6_K|...>   quantization preference (default from config)
-`)
-}
+            --file <path-in-repo>     pin exact weights in a repo with many builds
+            --control-net <org/repo>  attach a ControlNet (loaded with the model)
+            --control-net-file <path> pick one from a multi-file ControlNet repo
+            --as <name>               install under a different name
+  lora pull: --file <path-in-repo>    pick one adapter from a multi-adapter repo
+             --as <name>              install under a different name
+
+LoRAs are applied per request, not baked into a model:
+  curl :11534/v1/edit -d '{"model":"qwen-image-edit","prompt":"...","image":"<b64>",
+                           "loras":[{"name":"qwen-edit-lightning-4step"}]}'
+`
 
 // ---- daemon / app ----
 
@@ -112,8 +128,8 @@ func cmdServe(_ []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fmt.Printf("oflux serving on http://%s\n", a.Addr())
-	return a.Serve(ctx)
+	return a.Serve(ctx) // prints the listen address once the port is bound
+
 }
 
 func cmdMenubar(_ []string) error {
@@ -194,24 +210,46 @@ func cmdUpdate(_ []string) error {
 // ---- client commands ----
 
 func cmdPull(args []string) error {
-	name, quant, err := parseNameQuant(args)
+	p, err := parseNameQuant(args)
 	if err != nil {
 		return err
 	}
-	return streamPull(name, quant)
+	// Keep going after a failure so one bad name in a batch does not strand the
+	// rest, then report every failure at the end.
+	var failed []string
+	for _, name := range p.Names {
+		if len(p.Names) > 1 {
+			fmt.Printf("── %s\n", name)
+		}
+		if err := streamPull(p, name); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: %v\n", name, err)
+			failed = append(failed, name)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d failed: %s", len(failed), len(p.Names), strings.Join(failed, ", "))
+	}
+	return nil
 }
 
 func cmdRun(args []string) error {
-	name, quant, err := parseNameQuant(args)
+	p, err := parseNameQuant(args)
 	if err != nil {
 		return err
+	}
+	if len(p.Names) > 1 {
+		return errors.New("run takes one model; use `oflux pull` to install several")
 	}
 	installed, err := listModels()
 	if err != nil {
 		return err
 	}
+	name := p.Names[0]
+	if p.As != "" {
+		name = p.As
+	}
 	if !containsModel(installed, name) {
-		if err := streamPull(name, quant); err != nil {
+		if err := streamPull(p, p.Names[0]); err != nil {
 			return err
 		}
 	}
@@ -263,13 +301,32 @@ func cmdPS(_ []string) error {
 
 func cmdRm(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: oflux rm <name>")
+		return errors.New("usage: oflux rm <name> [name...]")
 	}
 	base, err := daemonBaseURL()
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"name": args[0]})
+	// Remove every name given, and keep going past a failure: silently stopping
+	// at the first one left the rest installed while the command looked like it
+	// had done its job.
+	var failed []string
+	for _, name := range args {
+		if err := deleteModel(base, name); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: %v\n", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		fmt.Printf("removed %s\n", name)
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d failed: %s", len(failed), len(args), strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+func deleteModel(base, name string) error {
+	body, _ := json.Marshal(map[string]string{"name": name})
 	resp, err := http.Post(base+"/api/delete", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return daemonDownError(err)
@@ -278,8 +335,147 @@ func cmdRm(args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return apiError(resp)
 	}
-	fmt.Printf("removed %s\n", args[0])
 	return nil
+}
+
+// ---- loras ----
+
+func cmdLora(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: oflux lora <ls|pull|rm> [args]")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "ls", "list":
+		return cmdLoraList()
+	case "pull", "add":
+		return cmdLoraPull(rest)
+	case "rm", "delete":
+		return cmdLoraRm(rest)
+	default:
+		return fmt.Errorf("unknown lora command %q (want ls, pull or rm)", sub)
+	}
+}
+
+type loraRow struct {
+	Name        string   `json:"name"`
+	Installed   bool     `json:"installed"`
+	Size        int64    `json:"size"`
+	Archs       []string `json:"archs"`
+	Steps       int      `json:"steps"`
+	Description string   `json:"description"`
+}
+
+func cmdLoraList() error {
+	base, err := daemonBaseURL()
+	if err != nil {
+		return err
+	}
+	var out struct {
+		Loras []loraRow `json:"loras"`
+	}
+	if err := getJSON(base+"/api/loras", &out); err != nil {
+		return err
+	}
+	if len(out.Loras) == 0 {
+		fmt.Println("no loras available")
+		return nil
+	}
+	fmt.Printf("%-28s %-10s %-8s %-6s %s\n", "NAME", "STATE", "SIZE", "STEPS", "FOR")
+	for _, l := range out.Loras {
+		state := "available"
+		size := ""
+		if l.Installed {
+			state = "installed"
+			size = humanSize(l.Size)
+		}
+		steps := ""
+		if l.Steps > 0 {
+			steps = fmt.Sprint(l.Steps)
+		}
+		fmt.Printf("%-28s %-10s %-8s %-6s %s\n", l.Name, state, size, steps, strings.Join(l.Archs, ","))
+	}
+	return nil
+}
+
+func cmdLoraPull(args []string) error {
+	var name, file, as string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--file", "-f":
+			if i+1 >= len(args) {
+				return errors.New("--file requires a value")
+			}
+			file = args[i+1]
+			i++
+		case "--as", "-a":
+			if i+1 >= len(args) {
+				return errors.New("--as requires a value")
+			}
+			as = args[i+1]
+			i++
+		default:
+			if name == "" {
+				name = args[i]
+			}
+		}
+	}
+	if name == "" {
+		return errors.New("usage: oflux lora pull <name|org/repo> [--file <path>] [--as <name>]")
+	}
+	base, err := daemonBaseURL()
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"name": name, "file": file, "as": as})
+	resp, err := http.Post(base+"/api/loras/pull", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return daemonDownError(err)
+	}
+	defer resp.Body.Close()
+	return streamNDJSON(resp)
+}
+
+func cmdLoraRm(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: oflux lora rm <name> [name...]")
+	}
+	base, err := daemonBaseURL()
+	if err != nil {
+		return err
+	}
+	var failed []string
+	for _, name := range args {
+		body, _ := json.Marshal(map[string]string{"name": name})
+		resp, err := http.Post(base+"/api/loras/delete", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return daemonDownError(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			fmt.Fprintf(os.Stderr, "error: %s: %v\n", name, apiError(resp))
+			failed = append(failed, name)
+		} else {
+			fmt.Printf("removed lora %s\n", name)
+		}
+		resp.Body.Close()
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d of %d failed: %s", len(failed), len(args), strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+func humanSize(n int64) string {
+	const unit = 1000
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "kMGT"[exp])
 }
 
 // ---- daemon HTTP helpers ----
@@ -314,17 +510,23 @@ func containsModel(ms []modelRow, name string) bool {
 	return false
 }
 
-func streamPull(name, quant string) error {
+func streamPull(p pullArgs, name string) error {
 	base, err := daemonBaseURL()
 	if err != nil {
 		return err
 	}
-	body, _ := json.Marshal(map[string]string{"name": name, "quant": quant})
+	body, _ := json.Marshal(p.request(name))
 	resp, err := http.Post(base+"/api/pull", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return daemonDownError(err)
 	}
 	defer resp.Body.Close()
+	return streamNDJSON(resp)
+}
+
+// streamNDJSON prints the {"status":...} lines of a progress stream and turns
+// the first {"error":...} line into the command's error.
+func streamNDJSON(resp *http.Response) error {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -347,25 +549,86 @@ func streamPull(name, quant string) error {
 	return sc.Err()
 }
 
-func parseNameQuant(args []string) (name, quant string, err error) {
+// pullArgs is the parsed form of a `pull`/`run` command line. Names holds every
+// positional argument, so one invocation can install several models.
+type pullArgs struct {
+	Names          []string
+	Quant          string
+	File           string
+	ControlNet     string
+	ControlNetFile string
+	As             string
+}
+
+// request is the wire form for one model, since /api/pull installs one at a time.
+func (p pullArgs) request(name string) map[string]string {
+	req := map[string]string{"name": name}
+	for k, v := range map[string]string{
+		"quant": p.Quant, "file": p.File, "control_net": p.ControlNet,
+		"control_net_file": p.ControlNetFile, "as": p.As,
+	} {
+		if v != "" {
+			req[k] = v
+		}
+	}
+	return req
+}
+
+func parseNameQuant(args []string) (pullArgs, error) {
+	var p pullArgs
+	need := func(i int, flag string) (string, error) {
+		if i+1 >= len(args) {
+			return "", fmt.Errorf("%s requires a value", flag)
+		}
+		return args[i+1], nil
+	}
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
+		var err error
+		switch a := args[i]; a {
 		case "--quant", "-q":
-			if i+1 >= len(args) {
-				return "", "", errors.New("--quant requires a value")
-			}
-			quant = args[i+1]
+			p.Quant, err = need(i, a)
+			i++
+		case "--file", "-f":
+			p.File, err = need(i, a)
+			i++
+		case "--control-net", "--controlnet":
+			p.ControlNet, err = need(i, a)
+			i++
+		case "--control-net-file", "--controlnet-file":
+			p.ControlNetFile, err = need(i, a)
+			i++
+		case "--as":
+			p.As, err = need(i, a)
 			i++
 		default:
-			if name == "" {
-				name = args[i]
+			if strings.HasPrefix(a, "-") {
+				return pullArgs{}, fmt.Errorf("unknown flag %q", a)
+			}
+			p.Names = append(p.Names, a)
+		}
+		if err != nil {
+			return pullArgs{}, err
+		}
+	}
+	if len(p.Names) == 0 {
+		return pullArgs{}, errors.New("a model name is required")
+	}
+	if p.ControlNetFile != "" && p.ControlNet == "" {
+		return pullArgs{}, errors.New("--control-net-file needs --control-net")
+	}
+	// These name or reshape a single install, so they cannot be spread across
+	// several: --as would give every model the same name, and --file/--control-net
+	// name a path inside one specific repo.
+	if len(p.Names) > 1 {
+		for flag, v := range map[string]string{
+			"--as": p.As, "--file": p.File, "--control-net": p.ControlNet,
+		} {
+			if v != "" {
+				return pullArgs{}, fmt.Errorf("%s applies to a single model, but %d were given", flag, len(p.Names))
 			}
 		}
 	}
-	if name == "" {
-		return "", "", errors.New("a model name is required")
-	}
-	return name, quant, nil
+	return p, nil
 }
 
 func daemonBaseURL() (string, error) {

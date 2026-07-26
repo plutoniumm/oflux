@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestBuildArgs(t *testing.T) {
 	}
 	blobPath := func(blob string) string { return "/blobs/" + blob }
 
-	got, err := buildArgs(m, blobPath, "127.0.0.1", "8080")
+	got, err := buildArgs(m, blobPath, "127.0.0.1", "8080", "/store/loras")
 	if err != nil {
 		t.Fatalf("buildArgs: %v", err)
 	}
@@ -90,11 +91,44 @@ func TestBuildArgs(t *testing.T) {
 		"--vae", "/blobs/sha256-vae",
 		"--diffusion-fa",
 		"--model-args", "qwen_image_zero_cond_t=true",
+		"--lora-model-dir", "/store/loras",
 		"--listen-ip", "127.0.0.1",
 		"--listen-port", "8080",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv mismatch\n got: %q\nwant: %q", got, want)
+	}
+
+	// With no LoRA directory configured the flag must be omitted entirely —
+	// sd-server treats an empty --lora-model-dir as the current directory.
+	got, err = buildArgs(m, blobPath, "127.0.0.1", "8080", "")
+	if err != nil {
+		t.Fatalf("buildArgs (no lora dir): %v", err)
+	}
+	if slices.Contains(got, "--lora-model-dir") {
+		t.Fatalf("empty LoraDir should omit the flag, got: %q", got)
+	}
+}
+
+// A ControlNet is a launch-time flag, so its blob path must land in argv.
+func TestBuildArgsControlNet(t *testing.T) {
+	m := types.Manifest{
+		Name: "sd15-canny",
+		Components: []types.Component{
+			{Role: types.RoleDiffusion, Blob: "sha256-diff"},
+			{Role: types.RoleControlNet, Blob: "sha256-cn"},
+		},
+		Engine: types.EngineSpec{
+			Flags: []string{"--model", "{diffusion}", "--control-net", "{control_net}"},
+		},
+	}
+	got, err := buildArgs(m, func(b string) string { return "/blobs/" + b }, "127.0.0.1", "8080", "")
+	if err != nil {
+		t.Fatalf("buildArgs: %v", err)
+	}
+	i := slices.Index(got, "--control-net")
+	if i < 0 || got[i+1] != "/blobs/sha256-cn" {
+		t.Fatalf("control net path not substituted: %q", got)
 	}
 }
 
@@ -103,7 +137,7 @@ func TestBuildArgsMissingComponent(t *testing.T) {
 		Name:   "broken",
 		Engine: types.EngineSpec{Flags: []string{"--vae", "{vae}"}},
 	}
-	if _, err := buildArgs(m, nil, "127.0.0.1", "1"); err == nil {
+	if _, err := buildArgs(m, nil, "127.0.0.1", "1", ""); err == nil {
 		t.Fatal("expected error for missing vae component")
 	}
 }

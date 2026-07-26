@@ -32,6 +32,10 @@ type Options struct {
 	BlobPath     func(blob string) string // resolves a Component.Blob to an absolute file path
 	Host         string                   // engine bind host; default "127.0.0.1"
 	StartTimeout time.Duration            // health-probe timeout; default 120s
+	// LoraDir is handed to the engine as --lora-model-dir. Requests reference
+	// adapters in it by filename, so every model gets the same directory and
+	// LoRAs need no reload to become available.
+	LoraDir string
 }
 
 // runner is one live sd-server subprocess.
@@ -91,20 +95,22 @@ func New(opts Options) *Supervisor {
 // placeholderRoles maps a "{role}" flag token to the role whose component path
 // should be substituted in its place.
 var placeholderRoles = map[string]types.Role{
-	"{diffusion}": types.RoleDiffusion,
-	"{vae}":       types.RoleVAE,
-	"{clip_l}":    types.RoleCLIPL,
-	"{t5xxl}":     types.RoleT5XXL,
-	"{llm}":       types.RoleLLM,
-	"{mmproj}":    types.RoleMMProj,
+	"{diffusion}":   types.RoleDiffusion,
+	"{vae}":         types.RoleVAE,
+	"{clip_l}":      types.RoleCLIPL,
+	"{t5xxl}":       types.RoleT5XXL,
+	"{llm}":         types.RoleLLM,
+	"{mmproj}":      types.RoleMMProj,
+	"{control_net}": types.RoleControlNet,
 }
 
 // buildArgs turns a manifest into the argv for sd-server: the engine flags with
 // {role} placeholders resolved to on-disk blob paths, followed by --model-args
-// entries (sorted for determinism), then the bind flags. The bind flags are
-// --listen-ip / --listen-port, as verified from stable-diffusion.cpp's server
-// (examples/server/README.md + main.cpp: listen_ip / listen_port).
-func buildArgs(m types.Manifest, blobPath func(string) string, host, port string) ([]string, error) {
+// entries (sorted for determinism), the LoRA directory, then the bind flags.
+// The bind flags are --listen-ip / --listen-port, as verified from
+// stable-diffusion.cpp's server (examples/server/README.md + main.cpp:
+// listen_ip / listen_port).
+func buildArgs(m types.Manifest, blobPath func(string) string, host, port, loraDir string) ([]string, error) {
 	if blobPath == nil {
 		blobPath = func(blob string) string { return blob }
 	}
@@ -133,6 +139,9 @@ func buildArgs(m types.Manifest, blobPath func(string) string, host, port string
 			pairs[i] = fmt.Sprintf("%s=%v", k, m.Engine.ModelArgs[k])
 		}
 		args = append(args, "--model-args", strings.Join(pairs, ","))
+	}
+	if loraDir != "" {
+		args = append(args, "--lora-model-dir", loraDir)
 	}
 	args = append(args, "--listen-ip", host, "--listen-port", port)
 	return args, nil
@@ -329,7 +338,7 @@ func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("supervisor: pick port: %w", err)
 	}
-	args, err := buildArgs(m, s.opts.BlobPath, s.opts.Host, port)
+	args, err := buildArgs(m, s.opts.BlobPath, s.opts.Host, port, s.opts.LoraDir)
 	if err != nil {
 		return nil, err
 	}
