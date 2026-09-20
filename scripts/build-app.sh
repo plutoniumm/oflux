@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Build dist/oflux.app — a macOS menu-bar (LSUIElement) app bundle wrapping the
-# oflux binary and, when available, the Metal sd-server engine.
+# Build dist/oflux.app — menu-bar (LSUIElement) bundle + the Metal engine.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,19 +12,26 @@ echo "==> building oflux.app $VERSION"
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RES"
 
-# The CLI/daemon/menu-bar binary. Double-clicking the .app opens the menu-bar
-# UI because Info.plist sets OFLUX_LAUNCH=menubar; from a terminal it's the CLI.
-CGO_ENABLED=1 go build -trimpath -ldflags "-X oflux/internal/version.Version=$VERSION" -o "$MACOS/oflux" ./cmd/oflux
+# SAM3=1 links the SAM3 segmenter into the binary. Plain string, not a bash
+# array: macOS ships bash 3.2, where "${A[@]}" on an empty array trips set -u.
+TAGS=""
+if [ "${SAM3:-1}" = "1" ]; then
+  TAGS="-tags sam3"
+  echo "==> linking SAM3 (static, from third_party/sam3-darwin-arm64)"
+fi
 
-# Info.plist (version substituted).
+# One binary for both: Info.plist sets OFLUX_LAUNCH=menubar, so double-clicking
+# opens the menu bar while a terminal invocation is the CLI.
+CGO_ENABLED=1 go build -trimpath $TAGS -ldflags "-X oflux/internal/version.Version=$VERSION" -o "$MACOS/oflux" ./cmd/oflux
+
 sed "s/__VERSION__/$VERSION/g" "$ROOT/packaging/Info.plist" > "$APP/Contents/Info.plist"
 
-# App icon. Regenerate from the SVG if missing (needs rsvg-convert).
+# Regenerate the icon from the SVG if missing (needs rsvg-convert).
 [ -f "$ROOT/packaging/oflux.icns" ] || "$ROOT/scripts/gen-icons.sh" || true
 [ -f "$ROOT/packaging/oflux.icns" ] && cp "$ROOT/packaging/oflux.icns" "$RES/oflux.icns" && echo "==> bundled app icon"
 
-# Bundle the engine if we can find it, plus its colocated shared libraries
-# (sd-server links @rpath/libstable-diffusion.dylib, resolved via @executable_path).
+# sd-server links @rpath/libstable-diffusion.dylib, resolved via
+# @executable_path, so its colocated dylibs must come along.
 ENGINE="${OFLUX_ENGINE:-$ROOT/third_party/sd-server}"
 if [ -x "$ENGINE" ]; then
   cp "$ENGINE" "$RES/sd-server"

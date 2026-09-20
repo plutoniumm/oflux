@@ -366,9 +366,9 @@ func TestGCStandalone(t *testing.T) {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 
-	freed, err := s.GC()
-	if err != nil {
-		t.Fatalf("GC: %v", err)
+	freed, collected, err := s.TryGC()
+	if err != nil || !collected {
+		t.Fatalf("TryGC: collected=%v err=%v", collected, err)
 	}
 	if len(freed) != 1 || freed[0] != orphan {
 		t.Errorf("GC freed = %v, want [%s]", freed, orphan)
@@ -442,5 +442,68 @@ func TestConfigPartialKeepsDefaults(t *testing.T) {
 	}
 	if got.DefaultQuant != def.DefaultQuant {
 		t.Errorf("DefaultQuant = %q, want default %q", got.DefaultQuant, def.DefaultQuant)
+	}
+}
+
+// Manifests and config are written via a temp file plus rename. An interrupted
+// write leaves "<name>.json.tmp" behind, which must never be read as a
+// manifest: one crashed pull would otherwise break listing — and therefore GC —
+// for the whole store.
+func TestPartialWritesAreIgnoredAndNotLeftBehind(t *testing.T) {
+	root := t.TempDir()
+	s, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.WriteManifest(types.Manifest{Name: "real"}); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	writeTemp(t, s.ManifestsDir(), "half.json.tmp", "{ truncated")
+
+	list, err := s.ListManifests()
+	if err != nil {
+		t.Fatalf("ListManifests: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "real" {
+		t.Fatalf("ListManifests = %+v, want just \"real\"", list)
+	}
+	if _, _, err := s.TryGC(); err != nil {
+		t.Fatalf("TryGC with a stray temp file: %v", err)
+	}
+
+	// A committed write leaves no temp file of its own.
+	if _, err := os.Stat(filepath.Join(s.ManifestsDir(), "real.json.tmp")); !os.IsNotExist(err) {
+		t.Errorf("WriteManifest left a temp file: %v", err)
+	}
+	if err := s.SaveConfig(types.DefaultConfig()); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config.json.tmp")); !os.IsNotExist(err) {
+		t.Errorf("SaveConfig left a temp file: %v", err)
+	}
+}
+
+// GC has to walk every manifest, so one unparsable manifest makes collection
+// impossible. Removing anything then must be refused rather than delete a
+// model whose blobs nothing could ever reclaim.
+func TestRemoveManifestRefusedWhenAnotherManifestIsUnparsable(t *testing.T) {
+	s := newTestStore(t)
+	blob := makeBlob(t, s, "weights")
+	if err := s.WriteManifest(types.Manifest{
+		Name:       "keeper",
+		Components: []types.Component{{Role: types.RoleDiffusion, Blob: blob}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeTemp(t, s.ManifestsDir(), "broken.json", "{ truncated")
+
+	if _, _, err := s.RemoveManifest("keeper"); err == nil {
+		t.Fatal("RemoveManifest should refuse while a manifest is unparsable")
+	}
+	if _, err := s.ReadManifest("keeper"); err != nil {
+		t.Errorf("keeper was deleted anyway: %v", err)
+	}
+	if !s.HasBlob(blob) {
+		t.Error("blob swept despite the refusal")
 	}
 }

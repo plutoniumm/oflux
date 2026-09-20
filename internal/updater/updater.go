@@ -7,12 +7,14 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,13 +41,39 @@ type Release struct {
 	ZipURL  string // download URL of the macOS-arm64 .app zip
 }
 
+// get issues a GET carrying the updater's User-Agent. The caller closes the body.
+func get(ctx context.Context, url, accept string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "oflux-updater")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	return http.DefaultClient.Do(req)
+}
+
+// run returns a helper's trimmed combined output, and on failure wraps it: a
+// ditto/codesign exit status alone says nothing about what went wrong.
+func run(ctx context.Context, bin string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if err != nil {
+		return s, fmt.Errorf("%v: %s", err, s)
+	}
+	return s, nil
+}
+
+// bundleExe is the binary inside a .app: its presence is what separates a usable
+// bundle from a half-copied one, so install and Recover both gate on it.
+func bundleExe(bundle string) string {
+	return filepath.Join(bundle, "Contents", "MacOS", "oflux")
+}
+
 // Latest returns the latest published (non-prerelease) release.
 func Latest(ctx context.Context) (Release, error) {
-	url := "https://api.github.com/repos/" + Repo + "/releases/latest"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "oflux-updater")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := get(ctx, "https://api.github.com/repos/"+Repo+"/releases/latest", "application/vnd.github+json")
 	if err != nil {
 		return Release{}, err
 	}
@@ -72,8 +100,8 @@ func Latest(ctx context.Context) (Release, error) {
 			rel.ZipURL = a.URL
 			break
 		}
-		if strings.HasSuffix(a.Name, ".zip") && rel.ZipURL == "" {
-			rel.ZipURL = a.URL
+		if rel.ZipURL == "" && strings.HasSuffix(a.Name, ".zip") {
+			rel.ZipURL = a.URL // fallback, until the arm64 asset shows up
 		}
 	}
 	if rel.ZipURL == "" {
@@ -85,33 +113,24 @@ func Latest(ctx context.Context) (Release, error) {
 // IsNewer reports whether release version `latest` is newer than `current`
 // (numeric X.Y.Z). A non-numeric current (e.g. "dev") is never updatable.
 func IsNewer(latest, current string) bool {
-	lc, cc := parseVer(latest), parseVer(current)
-	if lc == nil || cc == nil {
-		return false
-	}
-	for i := range 3 {
-		if lc[i] != cc[i] {
-			return lc[i] > cc[i]
-		}
-	}
-	return false
+	lv, lok := parseVer(latest)
+	cv, cok := parseVer(current)
+	return lok && cok && slices.Compare(lv[:], cv[:]) > 0
 }
 
-func parseVer(v string) []int {
+func parseVer(v string) (out [3]int, ok bool) {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
 	if v == "" {
-		return nil
+		return out, false
 	}
-	parts := strings.SplitN(v, ".", 3)
-	out := []int{0, 0, 0}
-	for i := 0; i < len(parts) && i < 3; i++ {
-		n, err := strconv.Atoi(strings.TrimSpace(parts[i]))
+	for i, part := range strings.SplitN(v, ".", 3) {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
 		if err != nil {
-			return nil
+			return out, false
 		}
 		out[i] = n
 	}
-	return out
+	return out, true
 }
 
 // Apply downloads rel and swaps its oflux.app in at appPath (the installed
@@ -135,18 +154,17 @@ func Apply(ctx context.Context, rel Release, appPath string) error {
 	}
 
 	ext := filepath.Join(tmp, "x")
-	if out, err := exec.CommandContext(ctx, "ditto", "-x", "-k", zipPath, ext).CombinedOutput(); err != nil {
-		return fmt.Errorf("unzip: %v: %s", err, out)
+	if _, err := run(ctx, dittoBin, "-x", "-k", zipPath, ext); err != nil {
+		return fmt.Errorf("unzip: %w", err)
 	}
-	newApp := filepath.Join(ext, "oflux.app")
 
 	// Stage the new bundle beside the installed one (same filesystem, so the
 	// swap below is a rename rather than a long copy).
 	staged := appPath + stageSuffix
 	_ = os.RemoveAll(staged)
-	if out, err := exec.CommandContext(ctx, dittoBin, newApp, staged).CombinedOutput(); err != nil {
+	if _, err := run(ctx, dittoBin, filepath.Join(ext, "oflux.app"), staged); err != nil {
 		_ = os.RemoveAll(staged)
-		return fmt.Errorf("stage new bundle (is %s writable?): %v: %s", filepath.Dir(appPath), err, out)
+		return fmt.Errorf("stage new bundle (is %s writable?): %w", filepath.Dir(appPath), err)
 	}
 	// Validate BEFORE touching the working install: a build that can't run
 	// would otherwise leave the user with no usable app and no way back.
@@ -181,13 +199,13 @@ func Recover(appPath string) string {
 	if appPath == "" {
 		return ""
 	}
-	if _, err := os.Stat(filepath.Join(appPath, "Contents", "MacOS", "oflux")); err == nil {
+	if _, err := os.Stat(bundleExe(appPath)); err == nil {
 		_ = os.RemoveAll(appPath + stageSuffix) // leftovers from a failed attempt
 		_ = os.RemoveAll(appPath + backupSuffix)
 		return ""
 	}
 	for _, cand := range []string{appPath + backupSuffix, appPath + stageSuffix} {
-		if _, err := os.Stat(filepath.Join(cand, "Contents", "MacOS", "oflux")); err != nil {
+		if _, err := os.Stat(bundleExe(cand)); err != nil {
 			continue
 		}
 		_ = os.RemoveAll(appPath)
@@ -201,14 +219,13 @@ func Recover(appPath string) string {
 // teamID returns the Developer ID team identifier a bundle is signed with, or
 // "" for an ad-hoc/unsigned bundle.
 func teamID(ctx context.Context, bundle string) string {
-	out, err := exec.CommandContext(ctx, codesignBin, "-dv", "--verbose=2", bundle).CombinedOutput()
+	out, err := run(ctx, codesignBin, "-dv", "--verbose=2", bundle)
 	if err != nil {
 		return ""
 	}
-	for line := range strings.SplitSeq(string(out), "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "TeamIdentifier="); ok {
-			v = strings.TrimSpace(v)
-			if v == "" || v == "not set" {
+			if v = strings.TrimSpace(v); v == "not set" {
 				return ""
 			}
 			return v
@@ -227,34 +244,33 @@ func teamID(ctx context.Context, bundle string) string {
 // user arbitrary code, because a signature that merely "verifies" says nothing
 // about who produced it.
 func validateBundle(ctx context.Context, bundle, installed string) error {
-	exe := filepath.Join(bundle, "Contents", "MacOS", "oflux")
+	exe := bundleExe(bundle)
 	fi, err := os.Stat(exe)
 	if err != nil {
-		return fmt.Errorf("missing executable")
+		return errors.New("missing executable")
 	}
 	if fi.Mode()&0o111 == 0 {
-		return fmt.Errorf("executable bit not set")
+		return errors.New("executable bit not set")
 	}
-	if out, err := exec.CommandContext(ctx, codesignBin, "--verify", "--strict", bundle).CombinedOutput(); err != nil {
-		return fmt.Errorf("code signature does not verify: %v: %s", err, strings.TrimSpace(string(out)))
+	if _, err := run(ctx, codesignBin, "--verify", "--strict", bundle); err != nil {
+		return fmt.Errorf("code signature does not verify: %w", err)
 	}
-	want, got := teamID(ctx, installed), teamID(ctx, bundle)
-	switch {
+	switch want, got := teamID(ctx, installed), teamID(ctx, bundle); {
 	case want == "":
 		// The running build is ad-hoc signed (a local `make install`), so there
 		// is no identity to match against. Refuse rather than accept anything.
-		return fmt.Errorf("this build is not Developer-ID signed; update it with `git pull && make install` instead")
+		return errors.New("this build is not Developer-ID signed; update it with `git pull && make install` instead")
 	case got != want:
 		return fmt.Errorf("signed by team %q, expected %q — refusing to install", got, want)
 	}
 	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(vctx, exe, "version").CombinedOutput()
+	out, err := run(vctx, exe, "version")
 	if err != nil {
-		return fmt.Errorf("new build does not run: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("new build does not run: %w", err)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(string(out)), "oflux") {
-		return fmt.Errorf("unexpected `version` output: %q", strings.TrimSpace(string(out)))
+	if !strings.HasPrefix(out, "oflux") {
+		return fmt.Errorf("unexpected `version` output: %q", out)
 	}
 	return nil
 }
@@ -271,7 +287,7 @@ func lockUpdate(appPath string) (func(), error) {
 				_ = os.Remove(lock) // stale lock from a killed updater
 				return lockUpdate(appPath)
 			}
-			return nil, fmt.Errorf("another update is already in progress")
+			return nil, errors.New("another update is already in progress")
 		}
 		return nil, err
 	}
@@ -291,9 +307,7 @@ func AppPathFromExe(exe string) string {
 }
 
 func download(ctx context.Context, url, dest string) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	req.Header.Set("User-Agent", "oflux-updater")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := get(ctx, url, "")
 	if err != nil {
 		return err
 	}
@@ -305,7 +319,9 @@ func download(ctx context.Context, url, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

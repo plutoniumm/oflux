@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -18,19 +19,20 @@ func BinDirs() []string {
 	return []string{"/usr/local/bin", "/opt/homebrew/bin", filepath.Join(home, ".local", "bin")}
 }
 
+// dirOnPath reports whether dir is one of the $PATH entries.
+func dirOnPath(dir string) bool {
+	return slices.Contains(filepath.SplitList(os.Getenv("PATH")), dir)
+}
+
 // LinkCLI symlinks the oflux binary at exe into a PATH directory. It returns the
 // link path and whether that directory is actually on $PATH. Idempotent: if the
 // correct symlink already exists it is left in place.
 func LinkCLI(exe string) (target string, onPath bool, err error) {
-	pathset := map[string]bool{}
-	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
-		if p != "" {
-			pathset[p] = true
-		}
-	}
 	home, _ := os.UserHomeDir()
 	var last error
 	for _, dir := range BinDirs() {
+		// Only the home-based candidate is ours to create; the system ones
+		// need root and must already exist.
 		if home != "" && strings.HasPrefix(dir, home) {
 			_ = os.MkdirAll(dir, 0o755)
 		}
@@ -47,9 +49,8 @@ func LinkCLI(exe string) (target string, onPath bool, err error) {
 			last = fmt.Errorf("%s exists and is not a symlink; leaving it alone", target)
 			continue
 		default:
-			existing, _ := os.Readlink(target)
-			if existing == exe {
-				return target, pathset[dir], nil // already linked correctly
+			if existing, _ := os.Readlink(target); existing == exe {
+				return target, dirOnPath(dir), nil // already linked correctly
 			}
 			_ = os.Remove(target) // our own (or another) symlink: safe to replace
 		}
@@ -57,7 +58,7 @@ func LinkCLI(exe string) (target string, onPath bool, err error) {
 			last = e
 			continue
 		}
-		return target, pathset[dir], nil
+		return target, dirOnPath(dir), nil
 	}
 	if last == nil {
 		last = errors.New("no writable bin directory found on PATH")

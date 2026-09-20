@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Build + sign oflux.app, install it to /Applications (or ~/Applications), and
-# register the login LaunchAgent — which also starts the menu-bar app now.
+# Build + sign oflux.app, install it, and register the login LaunchAgent.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 
-# Stop the login agent first so KeepAlive doesn't relaunch the app mid-reinstall
-# (which would hold the bundle open and race the swap), then stop any strays.
+# Stop the agent first, or KeepAlive relaunches the app mid-swap and holds the
+# bundle open.
 for L in io.github.plutoniumm.oflux ch.manav.oflux; do
   launchctl bootout "gui/$(id -u)/$L" 2>/dev/null || true
 done
@@ -16,7 +15,6 @@ sleep 1
 VERSION="${VERSION:-$(cat VERSION)}" ./scripts/build-app.sh
 ./scripts/sign-app.sh
 
-# Choose an install dir we can write without sudo.
 if [ -w /Applications ]; then DEST="/Applications/oflux.app"; else
   mkdir -p "$HOME/Applications"; DEST="$HOME/Applications/oflux.app"
 fi
@@ -29,7 +27,6 @@ codesign --verify "$DEST" 2>/dev/null && echo "    signature OK at $DEST"
 echo "==> registering LaunchAgent + launching menu-bar app"
 "$DEST/Contents/MacOS/oflux" install
 
-# The agent starts `oflux menubar`, which serves on :11534.
 if curl -s --retry 40 --retry-connrefused --retry-delay 1 http://127.0.0.1:11534/healthz >/dev/null; then
   echo "==> oflux is running — fox is in your menu bar, daemon on http://127.0.0.1:11534"
 else

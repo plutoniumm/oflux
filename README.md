@@ -36,20 +36,73 @@ curl localhost:11534/v1/edit -d '{
 ```
 
 Drop `"image"` and hit `/v1/generate` to generate instead. Both return
-`{"images": ["<base64 png>"]}`.
+`{"images": ["<base64 png>"], "seed": 12345}` — the seed is echoed even when you
+did not pass one, so a good result is always reproducible.
 
-Optional fields: `loras[]`, `ref_images[]`, `mask_image`, `control_image` +
-`control_strength`, `negative_prompt`, `strength`, `steps`, `seed`, `cfg`,
-`sampler`, `scheduler`, `guidance{txt_cfg,img_cfg,distilled_guidance,slg}`.
+`"image"` also takes an array: the first entry is the subject, the rest are
+reference images. That is how multi-image editing works — style refs, identity
+refs, "put this in that".
+
+```bash
+curl localhost:11534/v1/edit -d '{
+  "model": "qwen-image-edit",
+  "prompt": "put the person from the second image on this bench",
+  "image": ["data:image/png;base64,...", "data:image/png;base64,..."]
+}'
+```
+
+Optional fields: `loras[]`, `ref_images[]`, `mask` (white = edit),
+`mask_prompt` (name what to change and SAM3 masks it for you),
+`control_image` + `control_strength`, `negative_prompt`, `strength`, `steps`,
+`seed`, `cfg`, `sampler`, `scheduler`, `keep_alive`, `stream`,
+`guidance{txt_cfg,img_cfg,distilled_guidance,slg}`.
+
+`keep_alive` overrides the idle unload for that model — `"10m"` to hold it, `-1`
+to pin it resident. Chained edits otherwise pay a full reload between turns.
 
 On a step-distilled model (cfg 1.0) a large-area edit can drift into
 regenerating the image instead of editing it. Either say what to keep — "keep
 the fox exactly as it is, replace only the background" — or raise
 `guidance.img_cfg` to re-anchor it to the input.
 
+### Long jobs
+
+An edit can take minutes. `"stream": true` returns NDJSON instead of one
+response: the first line carries a job id, then status and step progress, then
+the same object a normal call would return. Disconnecting does not cancel the
+run — reattach with `GET /v1/jobs/{id}`, or abort with `DELETE /v1/jobs/{id}`.
+
+Requests queue one at a time per model (sd-server takes no parallelism flag), so
+a burst is serialised rather than thrashing the GPU. Past `queue_depth` the
+daemon answers `429` with `Retry-After` instead of blocking.
+
+### Presets
+
+A distilled LoRA is only correct at its trained steps and cfg, so bake the
+combination once and call it by name:
+
+```bash
+oflux preset add qwen8 --model qwen-image-edit \
+  --lora qwen-edit-lightning-8step --steps 8 --cfg 1 --label "Qwen 2511 (8-step)"
+```
+
+`"model": "qwen8"` then resolves to all of it; anything you pass explicitly wins.
+Presets appear in `/api/tags` as callable names.
+
+### Errors
+
+Failures return `{error, code, model, detail}`. `error` is the one line worth
+reading, `code` is a stable slug to branch on, and `detail` holds the tail of the
+engine log — sd.cpp failures are hundreds of lines and used to arrive as one
+opaque string.
+
 **OpenAI-compatible:** `POST /v1/images/edits` (multipart) and
-`/v1/images/generations` (JSON).
-**Management:** `/api/pull`, `/api/tags`, `/api/delete`, `/api/ps`, `/api/loras`.
+`/v1/images/generations` (JSON), including OpenAI's error shape.
+**Management:** `/api/pull`, `/api/tags`, `/api/delete`, `/api/ps`, `/api/loras`,
+`/api/presets`.
+**Segmentation:** `POST /v1/segment` takes `{image, prompt}` — or point/box
+prompts — and returns masks. Usually you do not need it directly: pass
+`mask_prompt` to `/v1/edit` and the mask is generated and applied in one call.
 
 ## LoRAs
 
@@ -105,6 +158,7 @@ only — none of the curated models above support it.
 |------|------|
 | `qwen-image-edit` | **both** — best instruction following |
 | `flux.2-klein` | **both** — 4-step, fast |
+| `flux.2-klein-9b` | **both** — the larger klein |
 | `flux.1-kontext` | **edit** |
 | `z-image-turbo` | generate — fast |
 | `flux.1-krea`, `flux.1-dev`, `flux.1-schnell`, `qwen-image` | generate |
@@ -143,7 +197,8 @@ over HTTP.
 ## Config `~/.oflux/config.json`
 
 ```json
-{ "port": 11534, "idle_ttl": "2m", "max_loaded": 1, "default_quant": "Q8_0", "hf_token": "" }
+{ "port": 11534, "idle_ttl": "2m", "max_loaded": 1, "max_concurrent": 1,
+  "queue_depth": 8, "default_quant": "Q8_0", "hf_token": "" }
 ```
 
 `hf_token` is only needed for gated repos; the mirrors oflux prefers are open.
@@ -158,10 +213,27 @@ make app        # dist/oflux.app
 make release    # signed + notarized .dmg/.zip (needs a Developer ID cert)
 ```
 
+SAM3 is compiled into the binary rather than supervised as a subprocess, and is
+on by default — the static libs are fetched automatically on first build, and
+the checkpoint downloads on first use. `make build SAM3=0` opts out, and
+`/v1/segment` then answers 501.
+
 Releases are Developer-ID signed and notarized; `verify.sh` (untracked, see
 `verify.sh.example`) holds the credentials and runs the whole flow. Local builds
 are ad-hoc signed and refuse to auto-update — updates there are `git pull &&
 make install`.
+
+`make release` needs notary credentials once:
+
+```bash
+xcrun notarytool store-credentials oflux-notary \
+  --apple-id "you@example.com" --team-id "TEAMID" --password "<app-specific-password>"
+```
+
+Or export `APPLE_ID`, `TEAM_ID` and `APP_PASSWORD` for a single run.
+`./scripts/notarize.sh --check` verifies credentials without submitting; the
+release runs it first so a missing one fails immediately rather than after a
+full build. The version comes from the `VERSION` file — bump it there only.
 
 ## License
 

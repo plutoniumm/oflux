@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# Sign dist/oflux.app for LOCAL use — no notarization, no Apple round-trip.
-#
-# Identity selection (first that applies):
-#   1. $SIGN_IDENTITY if set
-#   2. an installed "Developer ID Application" or "Apple Development" cert
-#   3. ad-hoc ("-")  <- needs nothing; runs on the machine that built it
-#
-# Locally-built apps have no quarantine attribute, so ad-hoc is enough to launch
-# them here. To hand the .app to another Mac, that user right-clicks > Open once.
+# Sign dist/oflux.app. Identity: $SIGN_IDENTITY, else an installed Developer ID
+# / Apple Development cert, else ad-hoc.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,21 +17,17 @@ fi
 [ -z "$IDENTITY" ] && IDENTITY="-"
 echo "==> signing with identity: $IDENTITY"
 
-# codesign rejects bundles carrying com.apple.FinderInfo, which iCloud-managed
-# folders (this repo may be one) keep re-stamping on the .app directory faster
-# than we can clear it. So sign a clean temp copy (xattrs stripped via ditto),
-# then copy the signed bundle back — the code seal covers Contents/, so a dir
-# xattr re-added by iCloud afterward is harmless to verification.
+# codesign rejects bundles with com.apple.FinderInfo, which iCloud re-stamps on
+# the .app faster than we can clear it. Sign a stripped temp copy instead.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 STAGE="$WORK/oflux.app"
 ditto --norsrc --noextattr --noqtn "$APP" "$STAGE"
 
 if [ "$IDENTITY" = "-" ]; then
-  # Ad-hoc: a single deep sign is simplest and runs on this machine as-is.
   codesign --force --deep --sign - "$STAGE"
 else
-  # Real cert: sign inside-out with hardened runtime + entitlements.
+  # Inside-out, hardened runtime + entitlements.
   while IFS= read -r -d '' f; do
     echo "    sign $f"
     codesign --force --options runtime --timestamp --sign "$IDENTITY" "$f"
@@ -48,18 +37,16 @@ else
 fi
 codesign --verify --deep --strict "$STAGE"
 
-# Swap the signed bundle back into place. The strict seal was already verified
-# on the clean temp copy above; here we use a basic verify because iCloud keeps
-# re-stamping a (cosmetic) FinderInfo xattr on the .app directory that --strict
-# treats as detritus. Basic verify confirms the code seal is intact regardless.
+# Basic (not --strict) verify after the swap: iCloud re-adds the cosmetic
+# FinderInfo xattr, which --strict calls detritus. The seal was checked above.
 rm -rf "$APP"
 ditto "$STAGE" "$APP"
 xattr -c "$APP" 2>/dev/null || true
 codesign -v "$APP"
 echo "==> signed and verified."
 if [ "$IDENTITY" = "-" ]; then
-  # NOTE: this must not be a bare `[ … ] && echo`, whose non-zero exit under
-  # `set -e` would abort the caller (install.sh) whenever a real cert is used.
+  # Must stay an if/else: a bare `[ … ] && echo` exits non-zero with a real
+  # cert and aborts the caller under `set -e`.
   echo "    (ad-hoc; for other Macs, right-click > Open the first time.)"
 else
   echo "    Developer ID signed. Notarize before distributing: make notarize ART=<file>"

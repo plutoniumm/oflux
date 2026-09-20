@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>oflux catalog</title>
+  <meta name="description" content="Every model and LoRA oflux can pull, and the commands that pull them.">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
+  <style>
+    :root { --oflux-accent: #e07a3f; }
+    .markdown-section { max-width: 60rem; }
+    .markdown-section table { display: table; width: 100%; }
+    .markdown-section td, .markdown-section th { vertical-align: top; }
+    .markdown-section td code { white-space: nowrap; }
+    .app-name-link, .markdown-section a { color: var(--oflux-accent); }
+    .markdown-section h1, .markdown-section h2 { color: #2c3e50; }
+    .markdown-section blockquote { border-left-color: var(--oflux-accent); }
+  </style>
+</head>
+<body>
+  <div id="app">Loading the oflux catalog…</div>
+  <script>
+    window.$docsify = {
+      name: 'oflux',
+      repo: 'https://github.com/plutoniumm/oflux',
+      homepage: 'README.md',
+      loadSidebar: false,
+      loadNavbar: false,
+      hideSidebar: true,
+      coverpage: false,
+      auto2top: true,
+      relativePath: false,
+      themeColor: '#e07a3f'
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-json.min.js"></script>
+</body>
+</html>

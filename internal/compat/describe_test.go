@@ -1,6 +1,9 @@
 package compat
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDescribeUnusable(t *testing.T) {
 	cases := []struct {
@@ -18,17 +21,8 @@ func TestDescribeUnusable(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := describeUnusable(c.files)
-		if !contains(got, c.want) {
+		if !strings.Contains(got, c.want) {
 			t.Errorf("%s: describeUnusable = %q, want it to mention %q", c.name, got, c.want)
 		}
 	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

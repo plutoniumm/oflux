@@ -133,35 +133,6 @@ func TestAttachControlNetErrors(t *testing.T) {
 	}
 }
 
-func TestQuantFallbacks(t *testing.T) {
-	// A bare K-quant must be able to reach its sized siblings: diffusion repos
-	// publish "Q4_K" where encoder repos publish "Q4_K_M"/"Q4_K_S".
-	got := quantFallbacks("Q4_K")
-	if got[0] != "Q4_K" {
-		t.Errorf("exact match must come first, got %q", got[0])
-	}
-	mi, si := slices.Index(got, "Q4_K_M"), slices.Index(got, "Q4_K_S")
-	if mi < 0 || si < 0 {
-		t.Fatalf("Q4_K should fall back to its sized siblings: %v", got)
-	}
-	if mi > si {
-		t.Errorf("medium should be preferred over small: %v", got)
-	}
-
-	// And the reverse: a sized label falls back to the bare one.
-	got = quantFallbacks("Q5_K_M")
-	if got[0] != "Q5_K_M" || !slices.Contains(got, "Q5_K") {
-		t.Errorf("Q5_K_M should fall back to Q5_K: %v", got)
-	}
-
-	// Every chain ends in a general-quality ladder so something always resolves.
-	for _, q := range []string{"Q4_K", "Q8_0", "weird"} {
-		if !slices.Contains(quantFallbacks(q), "Q4_K_M") {
-			t.Errorf("%s chain has no general fallback: %v", q, quantFallbacks(q))
-		}
-	}
-}
-
 // The real failure this prevents: the diffusion repo publishes Q4_K, the
 // encoder repo does not, and the 404 only surfaces after gigabytes of download.
 func TestCompanionQuantFallsBackToWhatTheRepoHas(t *testing.T) {
@@ -169,27 +140,28 @@ func TestCompanionQuantFallsBackToWhatTheRepoHas(t *testing.T) {
 		Source:      "mradermacher/Qwen2.5-VL-7B-Instruct-GGUF",
 		FilePattern: "Qwen2.5-VL-7B-Instruct.{quant}.gguf",
 		Quantized:   true,
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K"},
 	}
-	encoder := fakeRepo{paths: []string{
+	tree, _ := fakeRepo{paths: []string{
 		"Qwen2.5-VL-7B-Instruct.Q4_K_M.gguf",
 		"Qwen2.5-VL-7B-Instruct.Q4_K_S.gguf",
 		"Qwen2.5-VL-7B-Instruct.Q8_0.gguf",
-	}}
-	trees := map[string][]types.HFFile{}
+	}}.Tree(context.Background(), "", "")
 
-	got := companionFile(context.Background(), encoder, trees, comp, "Q4_K")
-	if got != "Qwen2.5-VL-7B-Instruct.Q4_K_M.gguf" {
+	if got := companionFile(comp, "Q4_K", tree); got != "Qwen2.5-VL-7B-Instruct.Q4_K_M.gguf" {
 		t.Errorf("Q4_K should resolve to the Q4_K_M the repo actually has, got %q", got)
 	}
-
-	// An exact match is still preferred over any fallback.
-	if got := companionFile(context.Background(), encoder, trees, comp, "Q8_0"); got != "Qwen2.5-VL-7B-Instruct.Q8_0.gguf" {
-		t.Errorf("Q8_0 = %q", got)
+	if got := companionFile(comp, "Q8_0", tree); got != "Qwen2.5-VL-7B-Instruct.Q8_0.gguf" {
+		t.Errorf("an exact match must win: %q", got)
 	}
 
-	// A non-quantized companion is passed through untouched.
+	// With no tree to read, archdb's recorded labels stand in for it.
+	if got := companionFile(comp, "Q4_K", nil); got != "Qwen2.5-VL-7B-Instruct.Q8_0.gguf" {
+		t.Errorf("declared-quant fallback = %q", got)
+	}
+
 	fixed := archdb.Companion{Source: "org/vae", FilePattern: "ae.safetensors"}
-	if got := companionFile(context.Background(), encoder, trees, fixed, "Q4_K"); got != "ae.safetensors" {
+	if got := companionFile(fixed, "Q4_K", tree); got != "ae.safetensors" {
 		t.Errorf("fixed companion = %q", got)
 	}
 }

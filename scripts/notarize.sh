@@ -1,31 +1,62 @@
 #!/usr/bin/env bash
-# Notarize and staple a built artifact (.dmg or .zip) with Apple.
+# Notarize and staple a .dmg/.zip. `--check` verifies credentials only.
 #
-# One-time setup (see README "Signing"):
-#   xcrun notarytool store-credentials oflux-notary \
-#     --apple-id "you@example.com" --team-id "TEAMID" --password "<app-specific-password>"
+#   ./scripts/notarize.sh dist/oflux-1.1.0.dmg
 #
-# Usage: ./scripts/notarize.sh dist/oflux-1.0.0.dmg
-# Env:   NOTARY_PROFILE (default "oflux-notary"), or NOTARY_APPLE_ID +
-#        NOTARY_TEAM_ID + NOTARY_PASSWORD for CI (no keychain profile).
+# Creds: keychain profile $NOTARY_PROFILE, else APPLE_ID + TEAM_ID + APP_PASSWORD
+# (NOTARY_-prefixed names also work).
 set -euo pipefail
 
-ART="${1:-}"
-[ -f "$ART" ] || { echo "usage: $0 <path to .dmg or .zip>" >&2; exit 1; }
 PROFILE="${NOTARY_PROFILE:-oflux-notary}"
+APPLE="${NOTARY_APPLE_ID:-${APPLE_ID:-}}"
+TEAM="${NOTARY_TEAM_ID:-${TEAM_ID:-}}"
+PASS="${NOTARY_PASSWORD:-${APP_PASSWORD:-}}"
 
-if [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_TEAM_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ]; then
-  AUTH=(--apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD")
-else
-  AUTH=(--keychain-profile "$PROFILE")
+auth_args() {
+  if [ -n "$APPLE" ] && [ -n "$TEAM" ] && [ -n "$PASS" ]; then
+    printf '%s\n' --apple-id "$APPLE" --team-id "$TEAM" --password "$PASS"
+  else
+    printf '%s\n' --keychain-profile "$PROFILE"
+  fi
+}
+
+# Asks Apple rather than reading the keychain: notarytool stores saved creds
+# where the `security` CLI cannot see them, so a keychain lookup reports
+# "missing" for a profile that works.
+have_creds() {
+  local auth=()
+  while IFS= read -r a; do auth+=("$a"); done < <(auth_args)
+  xcrun notarytool history "${auth[@]}" >/dev/null 2>&1
+}
+
+no_creds_help() {
+  cat >&2 <<EOF
+error: notarization credentials are missing or not accepted by Apple.
+
+  Store them once (an app-specific password from appleid.apple.com):
+
+    xcrun notarytool store-credentials $PROFILE \\
+      --apple-id "you@example.com" --team-id "TEAMID" --password "<app-specific-password>"
+
+  Or export APPLE_ID, TEAM_ID and APP_PASSWORD for this run.
+EOF
+}
+
+if [ "${1:-}" = "--check" ]; then
+  have_creds || { no_creds_help; exit 1; }
+  echo "==> notarization credentials OK"
+  exit 0
 fi
+
+ART="${1:-}"
+[ -f "$ART" ] || { echo "usage: $0 <path to .dmg or .zip> | --check" >&2; exit 1; }
+
+AUTH=()
+while IFS= read -r a; do AUTH+=("$a"); done < <(auth_args)
 
 echo "==> submitting $ART to Apple (this usually takes 1-5 minutes)"
 xcrun notarytool submit "$ART" "${AUTH[@]}" --wait
 
-# Stapling attaches the ticket so the artifact validates offline. Only disk
-# images and app bundles can be stapled — a .zip cannot, but the .app inside it
-# is validated by the ticket Apple issued for it.
 case "$ART" in
   *.dmg)
     xcrun stapler staple "$ART"
@@ -33,6 +64,7 @@ case "$ART" in
     echo "==> notarized + stapled: $ART"
     ;;
   *)
-    echo "==> notarized: $ART (zip archives cannot be stapled; staple the .app before zipping)"
+    # A .zip cannot be stapled; the .app inside carries the ticket.
+    echo "==> notarized: $ART (staple the .app before zipping)"
     ;;
 esac

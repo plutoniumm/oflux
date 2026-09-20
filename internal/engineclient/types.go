@@ -1,13 +1,12 @@
 package engineclient
 
 import (
-	"encoding/base64"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 )
 
-// SLG holds skip-layer-guidance parameters.
 type SLG struct {
 	Layers     []int    `json:"layers,omitempty"`
 	LayerStart *float64 `json:"layer_start,omitempty"`
@@ -15,7 +14,6 @@ type SLG struct {
 	Scale      *float64 `json:"scale,omitempty"`
 }
 
-// Guidance groups the various guidance knobs the engine understands.
 type Guidance struct {
 	TxtCFG            *float64 `json:"txt_cfg,omitempty"`
 	ImgCFG            *float64 `json:"img_cfg,omitempty"`
@@ -23,28 +21,25 @@ type Guidance struct {
 	SLG               *SLG     `json:"slg,omitempty"`
 }
 
-// SampleParams controls the sampler used for a generation.
 type SampleParams struct {
 	Scheduler    string    `json:"scheduler,omitempty"`
 	SampleMethod string    `json:"sample_method,omitempty"`
 	SampleSteps  *int      `json:"sample_steps,omitempty"`
-	Eta          *float64  `json:"eta,omitempty"`
 	Guidance     *Guidance `json:"guidance,omitempty"`
 }
 
-// Lora is one LoRA to apply to a generation. Path is resolved relative to the
-// engine's --lora-model-dir and must include the file extension.
-//
-// The engine deliberately does NOT parse "<lora:name:scale>" tags out of the
-// prompt (verified against sd-server: such a tag is tokenized as literal prompt
-// text). Structured entries here are the only way to apply a LoRA over HTTP.
+// Path is resolved against --lora-model-dir and must include the extension. The
+// engine does NOT parse "<lora:name:scale>" prompt tags (verified: tokenized as
+// literal text), so this struct is the only way to apply a LoRA over HTTP.
 type Lora struct {
 	Path       string  `json:"path"`
 	Multiplier float64 `json:"multiplier"`
 }
 
-// ImgGenRequest is the body of POST /sdcpp/v1/img_gen. All base64-image fields
-// carry raw base64 (no data: prefix), matching the sd-server native API.
+// Image fields carry raw base64, no data: prefix. Every optional numeric knob is
+// a pointer with omitempty on purpose: the engine distinguishes absent (keep the
+// value baked into the launch flags at pull time) from present-and-zero, so a
+// plain int would silently reset the model's defaults on every request.
 type ImgGenRequest struct {
 	Prompt         string `json:"prompt"`
 	NegativePrompt string `json:"negative_prompt,omitempty"`
@@ -55,10 +50,11 @@ type ImgGenRequest struct {
 	Width  *int `json:"width,omitempty"`
 	Height *int `json:"height,omitempty"`
 
-	Strength   *float64 `json:"strength,omitempty"`
-	Seed       *int64   `json:"seed,omitempty"`
-	BatchCount *int     `json:"batch_count,omitempty"`
+	Strength *float64 `json:"strength,omitempty"`
+	Seed     *int64   `json:"seed,omitempty"`
 
+	// oflux never sends InitImage: edit models take the input image as RefImages,
+	// because init_image denoises the input away at the default strength.
 	InitImage string   `json:"init_image,omitempty"`
 	RefImages []string `json:"ref_images,omitempty"`
 	MaskImage string   `json:"mask_image,omitempty"`
@@ -70,19 +66,31 @@ type ImgGenRequest struct {
 	OutputFormat string        `json:"output_format,omitempty"`
 }
 
-// Job is the engine's view of a submitted generation. PollURL is only populated
-// by the img_gen (Submit) response; Result and Error are populated once the job
-// reaches a terminal state. Result is left raw so callers decode it via
-// ImagesPNG, tolerating small shape differences across engine builds.
+// Result is left raw so ImagesB64 can tolerate shape differences across engine
+// builds. The engine's "poll_url" is not modelled: it is always exactly the
+// /sdcpp/v1/jobs/{id} path Poll builds from the id, and cancel has to be built
+// from the id anyway, so honouring it for one call in two would be a half-promise.
 type Job struct {
-	ID      string          `json:"id"`
-	Status  string          `json:"status"`
-	PollURL string          `json:"poll_url"`
-	Error   string          `json:"error"`
-	Result  json.RawMessage `json:"result"`
+	ID     string          `json:"id"`
+	Status string          `json:"status"`
+	Error  string          `json:"error"`
+	Result json.RawMessage `json:"result"`
 }
 
-// isTerminal reports whether a job status will not change further.
+// Reason is the engine's raw failure text, which for a model that cannot run is
+// the whole sd.cpp log for the attempt — hundreds of lines. Callers are expected
+// to show a short message and truncate Reason into a detail field.
+type JobError struct{ Op, Status, Reason string }
+
+func (e *JobError) Error() string {
+	op := cmp.Or(e.Op, "job")
+	status := cmp.Or(e.Status, "failed")
+	if e.Reason == "" {
+		return fmt.Sprintf("engine: %s %s", op, status)
+	}
+	return fmt.Sprintf("engine: %s %s: %s", op, status, e.Reason)
+}
+
 func isTerminal(status string) bool {
 	switch status {
 	case "completed", "failed", "cancelled":
@@ -92,26 +100,24 @@ func isTerminal(status string) bool {
 	}
 }
 
-// b64Item is one image entry inside a completed job's result. Different engine
-// builds (and OpenAI-compatible shims) key the payload as either "b64_json" or
-// "data", so we accept both.
+// Engine builds and OpenAI-compatible shims key the payload as either "b64_json"
+// or "data", so both are accepted.
 type b64Item struct {
 	B64JSON string `json:"b64_json"`
 	Data    string `json:"data"`
 }
 
-// imgResult is the completed-job result envelope. The native sd-server shape is
-// {"images":[{"b64_json":...}]}; the OpenAI-like shape is
-// {"data":[{"b64_json":...}]}. Both are handled.
+// Native sd-server is {"images":[...]}, the OpenAI-like shape {"data":[...]}.
 type imgResult struct {
 	Images []b64Item `json:"images"`
 	Data   []b64Item `json:"data"`
 }
 
-// ImagesPNG decodes every base64 image carried in a completed job's result.
-// It tolerates {"images":[{"b64_json":...}]}, {"images":[{"data":...}]} and
-// the OpenAI-like {"data":[{"b64_json":...}]} shapes.
-func (j Job) ImagesPNG() ([][]byte, error) {
+// ImagesB64 returns the result images as RAW base64, deliberately undecoded: the
+// engine hands us base64 and every oflux response hands base64 back out, so a
+// decode here would cost a decode plus a re-encode upstream (and ~2x the image in
+// garbage) per request for a string we already had.
+func (j Job) ImagesB64() ([]string, error) {
 	if len(j.Result) == 0 || string(j.Result) == "null" {
 		return nil, errors.New("engine: job has no result")
 	}
@@ -126,24 +132,26 @@ func (j Job) ImagesPNG() ([][]byte, error) {
 	if len(items) == 0 {
 		return nil, errors.New("engine: result carries no images")
 	}
-	out := make([][]byte, 0, len(items))
+	out := make([]string, 0, len(items))
 	for i, it := range items {
-		enc := it.B64JSON
-		if enc == "" {
-			enc = it.Data
-		}
+		enc := cmp.Or(it.B64JSON, it.Data)
 		if enc == "" {
 			return nil, fmt.Errorf("engine: image %d has no base64 payload", i)
 		}
-		raw, err := base64.StdEncoding.DecodeString(enc)
-		if err != nil {
-			// Some producers omit padding.
-			raw, err = base64.RawStdEncoding.DecodeString(enc)
-			if err != nil {
-				return nil, fmt.Errorf("engine: decode image %d: %w", i, err)
-			}
-		}
-		out = append(out, raw)
+		out = append(out, padB64(enc))
 	}
 	return out, nil
+}
+
+// padB64 restores the padding some producers omit — the one normalisation
+// ImagesB64 still does, because it is string arithmetic rather than a decode.
+func padB64(enc string) string {
+	switch len(enc) % 4 {
+	case 2:
+		return enc + "=="
+	case 3:
+		return enc + "="
+	}
+	// 1 is not valid base64 in any encoding; let the consumer report it.
+	return enc
 }

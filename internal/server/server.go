@@ -1,19 +1,24 @@
 // Package server exposes oflux's HTTP API on the daemon port (default 11534):
 // a clean JSON edit/generate surface that maps onto the sd-server native
 // img_gen API, plus model-management endpoints (pull/list/delete/ps).
+//
+// Request decoding, validation and error writing live in request.go; streaming
+// and job endpoints in stream.go; handlers here only parse, delegate and write.
 package server
 
 import (
+	"cmp"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"time"
 
+	"oflux/internal/archdb"
 	"oflux/internal/engineclient"
 	"oflux/internal/puller"
 	"oflux/internal/registry"
@@ -22,32 +27,36 @@ import (
 	"oflux/internal/types"
 )
 
-// Server wires the HTTP API to the store, supervisor, and puller.
 type Server struct {
 	store *store.Store
 	sup   *supervisor.Supervisor
 	pull  *puller.Puller
 	cfg   types.Config
+	jobs  *jobNotes
 }
 
-// New constructs a Server.
 func New(st *store.Store, sup *supervisor.Supervisor, pull *puller.Puller, cfg types.Config) *Server {
-	return &Server{store: st, sup: sup, pull: pull, cfg: cfg}
+	return &Server{store: st, sup: sup, pull: pull, cfg: cfg, jobs: newJobNotes()}
 }
 
-// Handler returns the HTTP handler with all routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleUI) // "/{$}" matches the root exactly
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("POST /v1/edit", s.handleImage(types.ModeEdit))
 	mux.HandleFunc("POST /v1/generate", s.handleImage(types.ModeGenerate))
+	mux.HandleFunc("POST /v1/segment", s.handleSegment)
+	mux.HandleFunc("GET /v1/jobs/{id}", s.handleJob)
+	mux.HandleFunc("DELETE /v1/jobs/{id}", s.handleJobCancel)
 	mux.HandleFunc("POST /v1/images/edits", s.handleOpenAIEdit)
 	mux.HandleFunc("POST /v1/images/generations", s.handleOpenAIGenerate)
 	mux.HandleFunc("POST /api/pull", s.handlePull)
 	mux.HandleFunc("GET /api/tags", s.handleTags)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
 	mux.HandleFunc("GET /api/ps", s.handlePS)
+	mux.HandleFunc("GET /api/presets", s.handlePresets)
+	mux.HandleFunc("POST /api/presets/create", s.handlePresetCreate)
+	mux.HandleFunc("POST /api/presets/delete", s.handlePresetDelete)
 	mux.HandleFunc("GET /api/loras", s.handleLoras)
 	mux.HandleFunc("POST /api/loras/pull", s.handleLoraPull)
 	mux.HandleFunc("POST /api/loras/delete", s.handleLoraDelete)
@@ -55,24 +64,24 @@ func (s *Server) Handler() http.Handler {
 	return guard(mux)
 }
 
-// maxBody caps request bodies. Images arrive base64-encoded in JSON, so this is
-// generous enough for large inputs while preventing a single request from
-// exhausting memory.
-const maxBody = 256 << 20 // 256 MiB
+// maxBody is the ONE limit on inbound size: ParseMultipartForm's argument, which
+// looked like a second smaller one, is a memory budget rather than a cap.
+const (
+	maxBody         = 256 << 20 // 256 MiB
+	multipartMemory = 32 << 20  // in-RAM slice of a multipart upload; the rest spills to disk
+)
 
-// guard protects the loopback API from web pages. Without it any site the user
-// visits could POST to 127.0.0.1:11534 (a CORS "simple request" needs no
-// preflight) and delete models or queue pulls, and a DNS-rebinding page could
-// read the responses. We therefore require the Host header to be loopback and
-// reject cross-origin requests outright. It also bounds request bodies.
+// Without guard, any site the user visits could POST to 127.0.0.1:11534 (a CORS
+// "simple request" needs no preflight) and delete models, and a DNS-rebinding
+// page could read the answers. Hence loopback Host only, no cross-origin.
 func guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !loopbackHost(r.Host) {
-			writeErr(w, http.StatusForbidden, "forbidden: unexpected Host header")
+			fail(w, statusErr(http.StatusForbidden, errors.New("forbidden: unexpected Host header")))
 			return
 		}
 		if origin := r.Header.Get("Origin"); origin != "" && !loopbackOrigin(origin) {
-			writeErr(w, http.StatusForbidden, "forbidden: cross-origin request")
+			fail(w, statusErr(http.StatusForbidden, errors.New("forbidden: cross-origin request")))
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
@@ -80,7 +89,6 @@ func guard(next http.Handler) http.Handler {
 	})
 }
 
-// loopbackHost reports whether a Host header names the local machine.
 func loopbackHost(host string) bool {
 	h, _, err := net.SplitHostPort(host)
 	if err != nil {
@@ -94,7 +102,6 @@ func loopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// loopbackOrigin reports whether an Origin header refers to the local machine.
 func loopbackOrigin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
@@ -103,27 +110,30 @@ func loopbackOrigin(origin string) bool {
 	return loopbackHost(u.Host)
 }
 
-// ---- request/response types (the clean oflux JSON API) ----
-
-// LoraRef selects an installed LoRA adapter for one request. Scale is the
-// adapter multiplier; omitted means 1.0 (full strength).
+// LoraRef selects an adapter; Scale is its multiplier, omitted meaning 1.0.
 type LoraRef struct {
 	Name  string   `json:"name"`
 	Scale *float64 `json:"scale,omitempty"`
 }
 
-// ImageRequest is the body for /v1/edit and /v1/generate. Images are base64 or
-// data URLs. For /v1/edit, Image is the image being edited.
+// Images are base64 or data URLs; Image is one string, or an array led by the
+// subject.
 type ImageRequest struct {
-	Model           string                 `json:"model"`
-	Prompt          string                 `json:"prompt"`
-	Loras           []LoraRef              `json:"loras,omitempty"`
-	NegativePrompt  string                 `json:"negative_prompt,omitempty"`
-	Image           string                 `json:"image,omitempty"`
-	RefImages       []string               `json:"ref_images,omitempty"`
-	ControlImage    string                 `json:"control_image,omitempty"`
+	// Model is an installed model, or a preset that resolves to one.
+	Model          string     `json:"model"`
+	Prompt         string     `json:"prompt"`
+	Loras          []LoraRef  `json:"loras,omitempty"`
+	NegativePrompt string     `json:"negative_prompt,omitempty"`
+	Image          ImageInput `json:"image,omitempty"`
+	RefImages      []string   `json:"ref_images,omitempty"`
+	ControlImage   string     `json:"control_image,omitempty"`
+	// One field, two names; WHITE marks the region to edit.
+	MaskImage string `json:"mask_image,omitempty"`
+	Mask      string `json:"mask,omitempty"`
+	// MaskPrompt names the region in words and lets SAM3 find it, so one call
+	// segments and edits. An explicit mask wins.
+	MaskPrompt      string                 `json:"mask_prompt,omitempty"`
 	ControlStrength *float64               `json:"control_strength,omitempty"`
-	MaskImage       string                 `json:"mask_image,omitempty"`
 	Strength        *float64               `json:"strength,omitempty"`
 	Steps           *int                   `json:"steps,omitempty"`
 	Sampler         string                 `json:"sampler,omitempty"`
@@ -133,107 +143,76 @@ type ImageRequest struct {
 	Height          *int                   `json:"height,omitempty"`
 	CFG             *float64               `json:"cfg,omitempty"`
 	Guidance        *engineclient.Guidance `json:"guidance,omitempty"`
+	// KeepAlive: "10m" or seconds; zero means the configured idle TTL.
+	KeepAlive Duration `json:"keep_alive,omitempty"`
+	// Stream makes the response NDJSON whose last line is this ImageResponse.
+	Stream bool `json:"stream,omitempty"`
 }
 
-// ImageResponse returns the generated image(s) as base64 PNG.
+// The seed is echoed because the engine picks its own and never reports it.
 type ImageResponse struct {
 	Model  string   `json:"model"`
 	Images []string `json:"images"`
+	Seed   int64    `json:"seed"`
 }
 
 func (s *Server) handleImage(mode types.Mode) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ImageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		if err := decodeJSON(r, &req); err != nil {
+			fail(w, err)
 			return
 		}
-		if req.Model == "" {
-			writeErr(w, http.StatusBadRequest, "model is required")
+		if req.Stream {
+			s.streamImage(w, r, &req, mode)
 			return
 		}
-		if mode == types.ModeEdit && req.Image == "" && len(req.RefImages) == 0 {
-			writeErr(w, http.StatusBadRequest, "edit requires an image (or ref_images)")
-			return
-		}
-		// The route, not the manifest, decides how the input is used — a hybrid
-		// model serves both endpoints with the same weights.
-		name, img, code, err := s.generate(r.Context(), req.Model, req, mode)
+		res, err := s.generate(r.Context(), &req, mode)
 		if err != nil {
-			writeErr(w, code, err.Error())
+			fail(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, ImageResponse{
-			Model:  name,
-			Images: []string{base64.StdEncoding.EncodeToString(img)},
-		})
+		writeJSON(w, http.StatusOK, res)
 	}
 }
 
-// generate reads the model manifest and runs one image through the supervisor.
-// It returns the resolved model name, the image bytes, and an HTTP status code
-// to use if err is non-nil. Shared by the native and OpenAI-compatible handlers.
-func (s *Server) generate(ctx context.Context, model string, req ImageRequest, mode types.Mode) (string, []byte, int, error) {
-	m, err := s.store.ReadManifest(model)
-	if errors.Is(err, store.ErrManifestNotFound) {
-		return "", nil, http.StatusNotFound, fmt.Errorf("model %q not installed — run: oflux pull %s", model, model)
-	}
+// Both API surfaces funnel through generate, so they accept the same things.
+func (s *Server) generate(ctx context.Context, req *ImageRequest, mode types.Mode) (ImageResponse, error) {
+	m, err := s.validate(req, mode)
 	if err != nil {
-		return "", nil, http.StatusInternalServerError, err
+		return ImageResponse{}, withModel(err, req.Model)
 	}
-	// Refuse a request the model cannot serve, rather than letting the engine
-	// silently ignore the input image (or invent a subject from nothing).
-	if mode == types.ModeEdit && !m.Mode.CanEdit() {
-		return "", nil, http.StatusBadRequest,
-			fmt.Errorf("model %q is generate-only; use /v1/generate", m.Name)
+	if err := resolveMask(ctx, req, nil); err != nil {
+		return ImageResponse{}, withModel(err, m.Name)
 	}
-	if mode == types.ModeGenerate && !m.Mode.CanGenerate() {
-		return "", nil, http.StatusBadRequest,
-			fmt.Errorf("model %q is edit-only; use /v1/edit with an image", m.Name)
-	}
-	// Reject an unknown sampler/scheduler here: the engine surfaces one as an
-	// opaque job failure, and only after loading the model.
-	sampler, scheduler, err := normalizeSampling(req.Sampler, req.Scheduler)
+	// The engine hands back base64 and so do we: never decoded on the way.
+	img, err := s.sup.Generate(ctx, m, buildImgGen(m, *req, mode), s.genOpts(req))
 	if err != nil {
-		return "", nil, http.StatusBadRequest, err
+		return ImageResponse{}, withModel(generationErr(err), m.Name)
 	}
-	req.Sampler, req.Scheduler = sampler, scheduler
-
-	// A ControlNet is loaded at engine startup, so a model installed without one
-	// can never honour control_image. Forwarding it anyway meant the engine
-	// quietly ignored it and returned an ordinary image — the request looked
-	// like it worked. Say so instead.
-	if req.ControlImage != "" {
-		if _, ok := m.Component(types.RoleControlNet); !ok {
-			return "", nil, http.StatusBadRequest, fmt.Errorf(
-				"model %q has no control net, so control_image would be ignored — reinstall it with one: oflux pull <repo> --control-net <org/repo> --as %s-control",
-				m.Name, m.Name)
-		}
-	}
-
-	// Validate LoRAs before spawning an engine: a bad name is a client error,
-	// and a missing adapter would otherwise surface as an opaque engine failure
-	// several minutes into a model load.
-	for _, l := range req.Loras {
-		if err := store.ValidLoraName(l.Name); err != nil {
-			return "", nil, http.StatusBadRequest, err
-		}
-		if !s.store.HasLora(l.Name) {
-			return "", nil, http.StatusNotFound,
-				fmt.Errorf("lora %q not installed — run: oflux lora pull %s", l.Name, l.Name)
-		}
-	}
-	img, err := s.sup.Generate(ctx, m, buildImgGen(m, req, mode))
-	if err != nil {
-		return "", nil, http.StatusInternalServerError, fmt.Errorf("generation failed: %w", err)
-	}
-	return m.Name, img, http.StatusOK, nil
+	return ImageResponse{Model: m.Name, Images: []string{img}, Seed: *req.Seed}, nil
 }
 
-// buildImgGen maps the oflux request onto the native sd-server img_gen request.
+func (s *Server) genOpts(req *ImageRequest) supervisor.GenOpts {
+	return supervisor.GenOpts{KeepAlive: time.Duration(req.KeepAlive)}
+}
+
+// A timeout is the caller's deadline; anything else keeps what the engine said.
+func generationErr(err error) error {
+	if errors.Is(err, supervisor.ErrBusy) {
+		// 429, not 409: the request is well formed, the server is saturated.
+		return &statusError{code: http.StatusTooManyRequests, slug: codeQueueFull,
+			err: errors.New("busy: the generation queue is full")}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return statusErr(http.StatusGatewayTimeout, fmt.Errorf("generation timed out: %w", err))
+	}
+	return fmt.Errorf("generation failed: %w", err)
+}
+
 // Model defaults (steps, cfg, flow-shift, sampling method) are baked into the
 // engine launch flags at pull time, so only caller-supplied OVERRIDES are sent
-// here — an omitted field keeps the model's default.
+// here — an omitted field keeps the model's default. Assumes validate() ran.
 func buildImgGen(m types.Manifest, r ImageRequest, mode types.Mode) engineclient.ImgGenRequest {
 	ig := engineclient.ImgGenRequest{
 		Prompt:          r.Prompt,
@@ -248,11 +227,12 @@ func buildImgGen(m types.Manifest, r ImageRequest, mode types.Mode) engineclient
 		MaskImage:       r.MaskImage,
 		OutputFormat:    "png",
 	}
-	if mode == types.ModeEdit && r.Image != "" {
+	if mode == types.ModeEdit && len(r.Image) > 0 {
 		// Instruction-edit models (Flux-Kontext, Qwen-Image-Edit) consume the
 		// input as a REFERENCE image, not an img2img init image — init_image would
 		// denoise the content away at the default strength, ignoring the input.
-		ig.RefImages = append([]string{r.Image}, ig.RefImages...)
+		// The subject leads: these models read the first reference as the subject.
+		ig.RefImages = append(slices.Clone([]string(r.Image)), ig.RefImages...)
 	}
 
 	steps, cfg := r.Steps, r.CFG
@@ -261,76 +241,59 @@ func buildImgGen(m types.Manifest, r ImageRequest, mode types.Mode) engineclient
 		if l.Scale != nil {
 			scale = *l.Scale
 		}
-		ig.Loras = append(ig.Loras, engineclient.Lora{
-			Path:       store.LoraFileName(l.Name),
-			Multiplier: scale,
-		})
-		// A step-distillation adapter changes the sampling regime of the model it
-		// is applied to: running a 4-step LoRA at the base model's 20 steps and
-		// cfg 2.5 produces burnt, over-saturated output. The engine launched with
-		// the base model's defaults, so supply the adapter's instead — unless the
-		// caller asked for specific values, which always win.
-		if known, ok := registry.LookupLora(l.Name); ok {
-			if steps == nil && known.Steps > 0 {
-				steps = &known.Steps
-			}
-			if cfg == nil && known.CFG > 0 {
-				cfg = &known.CFG
-			}
+		ig.Loras = append(ig.Loras, engineclient.Lora{Path: store.LoraFileName(l.Name), Multiplier: scale})
+		// A step-distillation adapter changes the sampling regime: a 4-step LoRA at
+		// the base model's 20 steps and cfg 2.5 burns the output. The engine
+		// launched with the base defaults, so supply the adapter's.
+		known, ok := registry.LookupLora(l.Name)
+		if !ok {
+			continue
+		}
+		if steps == nil && known.Steps > 0 {
+			steps = &known.Steps
+		}
+		if cfg == nil && known.CFG > 0 {
+			cfg = &known.CFG
 		}
 	}
-
-	sp := &engineclient.SampleParams{}
-	used := false
-	if steps != nil {
-		sp.SampleSteps = steps
-		used = true
-	}
-	// Sampler and scheduler matter a lot for step-distilled checkpoints — their
-	// authors usually name a specific pair (the Rapid line wants euler_a or
-	// er_sde with the beta schedule) and the model's launch default is rarely it.
-	if r.Sampler != "" {
-		sp.SampleMethod = r.Sampler
-		used = true
-	}
-	if r.Scheduler != "" {
-		sp.Scheduler = r.Scheduler
-		used = true
-	}
-
-	// cfg override: Flux models are distilled (distilled_guidance); everything
-	// else uses a true txt_cfg.
-	g := r.Guidance
-	if cfg != nil {
-		if g == nil {
-			g = &engineclient.Guidance{}
-		}
-		if strings.HasPrefix(m.Architecture, "flux") {
-			if g.DistilledGuidance == nil {
-				g.DistilledGuidance = cfg
-			}
-		} else if g.TxtCFG == nil {
-			g.TxtCFG = cfg
-		}
-	}
-	if g != nil {
-		sp.Guidance = g
-		used = true
-	}
-	if used {
-		ig.SampleParams = sp
-	}
+	ig.SampleParams = sampleParams(m, r, steps, cfg)
 	return ig
 }
 
-// ---- model management ----
+// Nil when the caller asked for nothing: the model's launch defaults stand.
+func sampleParams(m types.Manifest, r ImageRequest, steps *int, cfg *float64) *engineclient.SampleParams {
+	// Sampler and scheduler matter for step-distilled checkpoints: their authors
+	// name a pair (Rapid wants euler_a or er_sde with beta), rarely the default.
+	sp := engineclient.SampleParams{
+		SampleSteps:  steps,
+		SampleMethod: r.Sampler,
+		Scheduler:    r.Scheduler,
+		Guidance:     r.Guidance,
+	}
+	if cfg != nil {
+		// Flux is distilled (distilled_guidance); everything else uses txt_cfg.
+		if sp.Guidance == nil {
+			sp.Guidance = &engineclient.Guidance{}
+		}
+		if strings.HasPrefix(m.Architecture, "flux") {
+			if sp.Guidance.DistilledGuidance == nil {
+				sp.Guidance.DistilledGuidance = cfg
+			}
+		} else if sp.Guidance.TxtCFG == nil {
+			sp.Guidance.TxtCFG = cfg
+		}
+	}
+	if sp == (engineclient.SampleParams{}) {
+		return nil
+	}
+	return &sp
+}
 
 // PullRequest is the body for POST /api/pull.
 type PullRequest struct {
 	Name  string `json:"name"`
 	Quant string `json:"quant,omitempty"`
-	// File pins the exact diffusion weights inside a Hugging Face repo that
-	// publishes many builds. Ignored for curated models.
+	// File pins the weights inside a repo publishing many; curated models ignore it.
 	File string `json:"file,omitempty"`
 	// ControlNet attaches a ControlNet to the installed model; the engine can
 	// only load one at startup, so it is chosen here rather than per request.
@@ -343,90 +306,129 @@ type PullRequest struct {
 // handlePull streams NDJSON progress lines, one JSON object per line.
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	var req PullRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
 		return
 	}
-	if req.Name == "" {
-		writeErr(w, http.StatusBadRequest, "name is required")
+	// Only the install name has to be a legal manifest name, checked up front:
+	// finding out after a multi-gigabyte download is brutal.
+	if err := requireName("name", req.Name, nil); err != nil {
+		fail(w, err)
 		return
 	}
-	quant := req.Quant
-	if quant == "" {
-		quant = s.cfg.DefaultQuant
-	}
-
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	flusher, _ := w.(http.Flusher)
-	enc := json.NewEncoder(w)
-	emit := func(status string) {
-		enc.Encode(map[string]string{"status": status})
-		if flusher != nil {
-			flusher.Flush()
+	if req.As != "" {
+		if err := requireName("as", req.As, store.ValidModelName); err != nil {
+			fail(w, err)
+			return
 		}
 	}
 
-	m, err := s.pull.Pull(r.Context(), req.Name, quant, puller.Opts{
+	out := newNDJSON(w)
+	m, err := s.pull.Pull(r.Context(), req.Name, cmp.Or(req.Quant, s.cfg.DefaultQuant), puller.Opts{
 		File:           req.File,
 		ControlNet:     req.ControlNet,
 		ControlNetFile: req.ControlNetFile,
 		As:             req.As,
-	}, puller.Progress(emit))
+	}, puller.Progress(out.status))
 	if err != nil {
-		enc.Encode(map[string]string{"error": err.Error()})
-		if flusher != nil {
-			flusher.Flush()
-		}
+		out.finish("", err)
 		return
 	}
-	enc.Encode(map[string]string{"status": "success", "name": m.Name})
-	if flusher != nil {
-		flusher.Flush()
+	out.finish(m.Name, nil)
+}
+
+// ModelRow is one GET /api/tags entry; presets list here too, being callable.
+type ModelRow struct {
+	Name         string     `json:"name"`
+	Architecture string     `json:"architecture,omitempty"`
+	Mode         types.Mode `json:"mode,omitempty"`
+	Loaded       bool       `json:"loaded"`
+	Base         string     `json:"base,omitempty"`     // checkpoint identity, e.g. "Qwen-Image-Edit-2511"
+	Revision     string     `json:"revision,omitempty"` // HF revision or release tag
+	Preset       bool       `json:"preset,omitempty"`
+	Label        string     `json:"label,omitempty"`
+}
+
+// Mode comes from archdb, not the manifest: Manifest.Mode is frozen at pull
+// time, so a FLUX.2 installed before oflux learned it edits by reference
+// reported "generate" forever — which is why clients grew editArches tables.
+func modelRow(m types.Manifest, loaded bool) ModelRow {
+	return ModelRow{
+		Name:         m.Name,
+		Architecture: m.Architecture,
+		Mode:         archdb.ModeOf(m.Architecture, m.Mode),
+		Loaded:       loaded,
+		Base:         m.Base,
+		Revision:     m.Revision,
 	}
 }
 
-func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
+// /api/tags, /v1/models and /api/ps project this into three different wire
+// shapes. The shapes are contracts; the data behind them is read in one place.
+func (s *Server) installed() ([]types.Manifest, map[string]bool, error) {
 	ms, err := s.store.ListManifests()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, nil, err
 	}
 	loaded := map[string]bool{}
 	for _, n := range s.sup.Loaded() {
 		loaded[n] = true
 	}
-	type row struct {
-		Name         string     `json:"name"`
-		Architecture string     `json:"architecture"`
-		Mode         types.Mode `json:"mode"`
-		Loaded       bool       `json:"loaded"`
-	}
-	out := make([]row, 0, len(ms))
-	for _, m := range ms {
-		out = append(out, row{m.Name, m.Architecture, m.Mode, loaded[m.Name]})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": out})
+	return ms, loaded, nil
 }
 
-// DeleteRequest is the body for POST /api/delete.
+func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
+	ms, loaded, err := s.installed()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	out := make([]ModelRow, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, modelRow(m, loaded[m.Name]))
+	}
+	resp := map[string]any{"models": out}
+	// A malformed preset must not make the model list unreadable.
+	presets, err := s.store.ListPresets()
+	if err != nil {
+		resp["warning"] = "presets unavailable: " + err.Error()
+	}
+	for _, p := range presets {
+		row := ModelRow{Name: p.Name, Label: p.Label, Preset: true}
+		if m, err := s.store.ReadManifest(p.Model); err == nil {
+			t := modelRow(m, loaded[m.Name])
+			row.Architecture, row.Mode, row.Loaded = t.Architecture, t.Mode, t.Loaded
+			row.Base, row.Revision = t.Base, t.Revision
+		}
+		out = append(out, row)
+	}
+	resp["models"] = out
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// DeleteRequest is the body for POST /api/delete and POST /api/loras/delete.
 type DeleteRequest struct {
 	Name string `json:"name"`
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	var req DeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("name", req.Name, store.ValidModelName); err != nil {
+		fail(w, err)
 		return
 	}
 	_ = s.sup.Unload(req.Name) // best-effort stop if running
 	freed, collected, err := s.store.RemoveManifest(req.Name)
 	if errors.Is(err, store.ErrManifestNotFound) {
-		writeErr(w, http.StatusNotFound, fmt.Sprintf("model %q not installed", req.Name))
+		fail(w, coded(codeModelNotFound, notFound("model %q not installed", req.Name)))
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		fail(w, err)
 		return
 	}
 	resp := map[string]any{"status": "deleted", "freed_blobs": len(freed)}
@@ -437,32 +439,41 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ---- LoRA management ----
-
-// LoraRow is one entry in GET /api/loras. Installed adapters carry a size;
-// curated-but-not-installed ones are listed too so a client can offer them.
+// LoraRow is one GET /api/loras entry; uninstalled curated ones list too, so a
+// client can offer them. For/Steps/CFG come from the sidecar, then the curated
+// table: a hand-dropped adapter has neither and used to list blank.
 type LoraRow struct {
-	Name        string   `json:"name"`
-	Installed   bool     `json:"installed"`
-	Size        int64    `json:"size,omitempty"`
+	Name      string   `json:"name"`
+	Installed bool     `json:"installed"`
+	Size      int64    `json:"size,omitempty"`
+	For       []string `json:"for,omitempty"`
+	// Archs is the older spelling of For, still emitted for old clients.
 	Archs       []string `json:"archs,omitempty"`
 	Steps       int      `json:"steps,omitempty"`
+	CFG         float64  `json:"cfg,omitempty"`
 	Description string   `json:"description,omitempty"`
 }
 
 func (s *Server) handleLoras(w http.ResponseWriter, r *http.Request) {
 	installed, err := s.store.ListLoras()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		fail(w, err)
 		return
 	}
 	rows := make([]LoraRow, 0, len(installed))
 	seen := make(map[string]bool, len(installed))
 	for _, l := range installed {
-		row := LoraRow{Name: l.Name, Installed: true, Size: l.Size}
+		// The sidecar wins: the curated table may not know the adapter at all.
+		row := LoraRow{Name: l.Name, Installed: true, Size: l.Size, For: l.For, Steps: l.Steps, CFG: l.CFG}
 		if c, ok := registry.LookupLora(l.Name); ok {
-			row.Archs, row.Steps, row.Description = c.Archs, c.Steps, c.Description
+			if len(row.For) == 0 {
+				row.For = c.Archs
+			}
+			row.Steps = cmp.Or(row.Steps, c.Steps)
+			row.CFG = cmp.Or(row.CFG, c.CFG)
+			row.Description = c.Description
 		}
+		row.Archs = row.For
 		rows = append(rows, row)
 		seen[l.Name] = true
 	}
@@ -471,76 +482,143 @@ func (s *Server) handleLoras(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rows = append(rows, LoraRow{
-			Name: c.Name, Archs: c.Archs, Steps: c.Steps, Description: c.Description,
+			Name: c.Name, For: c.Archs, Archs: c.Archs,
+			Steps: c.Steps, CFG: c.CFG, Description: c.Description,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"loras": rows})
 }
 
-// LoraPullRequest is the body for POST /api/loras/pull.
 type LoraPullRequest struct {
 	Name string `json:"name"`           // curated lora name or org/repo
 	File string `json:"file,omitempty"` // path within the repo, when ambiguous
 	As   string `json:"as,omitempty"`   // install under this name instead
+	// For an arbitrary repo the sidecar is all oflux will ever know.
+	For   []string `json:"for,omitempty"`
+	Steps int      `json:"steps,omitempty"`
+	CFG   float64  `json:"cfg,omitempty"`
 }
 
-// handleLoraPull streams NDJSON progress, matching /api/pull.
 func (s *Server) handleLoraPull(w http.ResponseWriter, r *http.Request) {
 	var req LoraPullRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
 		return
 	}
-	if req.Name == "" {
-		writeErr(w, http.StatusBadRequest, "name is required")
+	if err := requireName("name", req.Name, nil); err != nil {
+		fail(w, err)
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	flusher, _ := w.(http.Flusher)
-	enc := json.NewEncoder(w)
-	emit := func(status string) {
-		enc.Encode(map[string]string{"status": status})
-		if flusher != nil {
-			flusher.Flush()
+	// The install name becomes the filename the engine loads by.
+	if req.As != "" {
+		if err := requireName("as", req.As, store.ValidLoraName); err != nil {
+			fail(w, err)
+			return
 		}
 	}
 
-	name, err := s.pull.PullLora(r.Context(), req.Name, req.File, req.As, puller.Progress(emit))
-	if err != nil {
-		enc.Encode(map[string]string{"error": err.Error()})
-	} else {
-		enc.Encode(map[string]string{"status": "success", "name": name})
-	}
-	if flusher != nil {
-		flusher.Flush()
-	}
+	out := newNDJSON(w)
+	name, err := s.pull.PullLora(r.Context(), req.Name, puller.LoraOpts{
+		File: req.File, As: req.As, For: req.For, Steps: req.Steps, CFG: req.CFG,
+	}, puller.Progress(out.status))
+	out.finish(name, err)
 }
 
 func (s *Server) handleLoraDelete(w http.ResponseWriter, r *http.Request) {
 	var req DeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("name", req.Name, store.ValidLoraName); err != nil {
+		fail(w, err)
 		return
 	}
 	err := s.store.RemoveLora(req.Name)
 	if errors.Is(err, store.ErrLoraNotFound) {
-		writeErr(w, http.StatusNotFound, fmt.Sprintf("lora %q not installed", req.Name))
+		fail(w, coded(codeLoraNotFound, notFound("lora %q not installed", req.Name)))
 		return
 	}
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+}
+
+func (s *Server) handlePresets(w http.ResponseWriter, r *http.Request) {
+	presets, err := s.store.ListPresets()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"presets": presets})
+}
+
+func (s *Server) handlePresetCreate(w http.ResponseWriter, r *http.Request) {
+	var p store.Preset
+	if err := decodeJSON(r, &p); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("name", p.Name, store.ValidModelName); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("model", p.Model, store.ValidModelName); err != nil {
+		fail(w, err)
+		return
+	}
+	// A bad sampler should fail now, not minutes into the first generation.
+	sampler, scheduler, err := normalizeSampling(p.Sampler, p.Scheduler)
+	if err != nil {
+		fail(w, statusErr(http.StatusBadRequest, err))
+		return
+	}
+	p.Sampler, p.Scheduler = sampler, scheduler
+	if err := s.store.WritePreset(p); err != nil {
+		fail(w, err)
+		return
+	}
+	resp := map[string]any{"status": "created", "name": p.Name}
+	if _, err := s.store.ReadManifest(p.Model); err != nil {
+		resp["note"] = fmt.Sprintf("model %q is not installed yet — run: oflux pull %s", p.Model, p.Model)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handlePresetDelete(w http.ResponseWriter, r *http.Request) {
+	var req DeleteRequest
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("name", req.Name, store.ValidModelName); err != nil {
+		fail(w, err)
+		return
+	}
+	err := s.store.RemovePreset(req.Name)
+	if errors.Is(err, store.ErrPresetNotFound) {
+		fail(w, coded(codePresetNotFound, notFound("preset %q not found", req.Name)))
+		return
+	}
+	if err != nil {
+		fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 }
 
 func (s *Server) handlePS(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"loaded": s.sup.Loaded()})
+	writeJSON(w, http.StatusOK, map[string]any{"loaded": s.sup.Loaded(), "pending": s.sup.Pending()})
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	ms, _ := s.store.ListManifests()
+	ms, _, err := s.installed()
+	if err != nil {
+		fail(w, err)
+		return
+	}
 	type model struct {
 		ID     string `json:"id"`
 		Object string `json:"object"`
@@ -550,16 +628,4 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		data = append(data, model{ID: m.Name, Object: "model"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
-}
-
-// ---- helpers ----
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]any{"error": msg})
 }

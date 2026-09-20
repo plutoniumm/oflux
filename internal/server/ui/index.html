@@ -138,6 +138,10 @@
     width: 100%; max-height: 190px; object-fit: contain;
     border-radius: 6px; display: block;
   }
+  /* Several images: the first is the subject being edited, the rest are
+     references the model reads for style or identity. */
+  .drop.has .strip { display: flex; gap: 6px; align-items: center; }
+  .drop.has .strip img { width: auto; flex: 1 1 0; min-width: 0; }
   .clear {
     margin-top: 8px;
     font-family: var(--mono);
@@ -331,15 +335,20 @@
     <div class="field" id="imageField" hidden>
       <label class="label" for="drop" id="imageLabel">Image to edit</label>
       <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose an image to edit">
-        Drop an image, paste, or <b>browse</b>
+        Drop images, paste, or <b>browse</b>
       </div>
-      <input type="file" id="file" accept="image/*" hidden>
-      <button type="button" class="clear" id="clear" hidden>Remove image</button>
+      <input type="file" id="file" accept="image/*" multiple hidden>
+      <button type="button" class="clear" id="clear" hidden>Remove images</button>
     </div>
 
     <div class="field">
       <label class="label" for="prompt">Prompt</label>
       <textarea id="prompt" placeholder="Describe the change you want."></textarea>
+    </div>
+
+    <div class="field" id="maskField" hidden>
+      <label class="label" for="maskPrompt">Change only (optional)</label>
+      <input type="text" id="maskPrompt" placeholder="the woman with the white umbrella">
     </div>
 
     <div class="field" id="loraField" hidden>
@@ -379,6 +388,7 @@
     <div class="readout" id="readout" hidden>
       <span id="meta"></span>
       <span class="spacer"></span>
+      <button type="button" class="act" id="seedAgain" hidden>Reuse seed</button>
       <button type="button" class="act" id="reuse">Use as input</button>
       <a class="act" id="save" download="oflux.png">Save</a>
     </div>
@@ -394,8 +404,10 @@
     steps: $("steps"), seed: $("seed"), run: $("run"), note: $("note"),
     form: $("form"), drop: $("drop"), file: $("file"), clear: $("clear"),
     imageField: $("imageField"), imageLabel: $("imageLabel"),
+    maskField: $("maskField"), maskPrompt: $("maskPrompt"),
     plate: $("plate"), empty: $("empty"),
     readout: $("readout"), meta: $("meta"), save: $("save"), reuse: $("reuse"),
+    seedAgain: $("seedAgain"),
     dot: $("dot"), statusText: $("statusText"),
     loraField: $("loraField"), loras: $("loras"),
   };
@@ -403,14 +415,18 @@
   let models = [];
   let loras = [];            // installed adapters
   const picked = new Set();  // adapter names enabled for the next run
-  let inputDataURL = null;   // the image being edited
+  let inputs = [];           // [subject, ...references]
   let busy = false;
 
   const currentModel = () => models.find((m) => m.name === els.model.value);
-  // A hybrid model ("both") edits when given an image and generates when not,
-  // so the form follows the image field rather than the model's mode alone.
-  const canEdit = () => ["edit", "both"].includes(currentModel()?.mode);
-  const isEdit = () => canEdit() && (currentModel()?.mode !== "both" || !!inputDataURL);
+  // A mode of "both" is a hybrid that edits when given an image, so every
+  // "can this take an image?" question has to accept it — never compare a mode
+  // against "edit" alone.
+  const editable = (m) => m?.mode === "edit" || m?.mode === "both";
+  // A hybrid edits when given an image and generates when not, so the form
+  // follows the image field rather than the model's mode alone.
+  const canEdit = () => editable(currentModel());
+  const isEdit = () => canEdit() && (currentModel()?.mode !== "both" || inputs.length > 0);
 
   function say(msg, bad) {
     els.note.textContent = msg || "";
@@ -442,9 +458,17 @@
     // Keep the user's choice across refreshes — this reruns after every
     // generation to update the "loaded" markers.
     const keep = els.model.value;
-    els.model.innerHTML = models
-      .map((m) => `<option value="${m.name}">${m.name}  ·  ${m.mode}${m.loaded ? "  ·  loaded" : ""}</option>`)
-      .join("");
+    // Built as DOM nodes rather than an HTML string: a model name is whatever
+    // the user passed to `oflux pull --as`, so interpolating one into markup
+    // would let a name containing a tag run script in this page.
+    els.model.replaceChildren(...models.map((m) => {
+      const o = document.createElement("option");
+      o.value = m.name;
+      // A preset is callable exactly like a model, so it sits in the same list.
+      o.textContent = `${m.label || m.name}  ·  ${m.preset ? "preset" : m.mode}` +
+        (m.loaded ? "  ·  loaded" : "");
+      return o;
+    }));
     if (keep && models.some((m) => m.name === keep)) els.model.value = keep;
     els.run.disabled = false;
     syncMode();
@@ -456,6 +480,8 @@
     const hybrid = currentModel()?.mode === "both";
     const edit = isEdit();
     els.imageField.hidden = !canEdit();
+    // Naming a region only means anything once there is an image to find it in.
+    els.maskField.hidden = !edit;
     els.imageLabel.textContent = hybrid ? "Image to edit (optional)" : "Image to edit";
     els.run.textContent = edit ? "Edit image" : "Generate image";
     els.prompt.placeholder = edit
@@ -510,50 +536,58 @@
 
   // ---- image input -----------------------------------------------------
 
-  function setInput(dataURL) {
-    inputDataURL = dataURL;
+  function setInputs(list) {
+    inputs = list;
     // On a hybrid, adding or clearing the image switches which endpoint runs.
     setTimeout(() => { if (currentModel()?.mode === "both") syncMode(); }, 0);
-    if (!dataURL) {
+    if (!inputs.length) {
       els.drop.classList.remove("has");
-      els.drop.innerHTML = "Drop an image, paste, or <b>browse</b>";
+      els.drop.innerHTML = "Drop images, paste, or <b>browse</b>";
       els.clear.hidden = true;
       return;
     }
     els.drop.classList.add("has");
     els.drop.innerHTML = "";
-    const img = new Image();
-    img.src = dataURL;
-    img.alt = "Image to edit";
-    els.drop.appendChild(img);
+    const strip = document.createElement("div");
+    strip.className = "strip";
+    inputs.forEach((src, i) => {
+      const img = new Image();
+      img.src = src;
+      img.alt = i === 0 ? "Image to edit" : `Reference ${i}`;
+      strip.appendChild(img);
+    });
+    els.drop.appendChild(strip);
     els.clear.hidden = false;
+    say(inputs.length > 1 ? "First image is the subject; the rest are references." : "");
   }
 
-  function readFile(f) {
-    if (!f || !f.type.startsWith("image/")) return;
-    const fr = new FileReader();
-    fr.onload = () => setInput(fr.result);
-    fr.readAsDataURL(f);
+  function readFiles(files) {
+    for (const f of files || []) {
+      if (!f || !f.type.startsWith("image/")) continue;
+      const fr = new FileReader();
+      fr.onload = () => setInputs([...inputs, fr.result]);
+      fr.readAsDataURL(f);
+    }
   }
 
   els.drop.addEventListener("click", () => els.file.click());
   els.drop.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); els.file.click(); }
   });
-  els.file.addEventListener("change", () => readFile(els.file.files[0]));
-  els.clear.addEventListener("click", () => { setInput(null); els.file.value = ""; });
+  els.file.addEventListener("change", () => readFiles(els.file.files));
+  els.clear.addEventListener("click", () => { setInputs([]); els.file.value = ""; });
   ["dragenter", "dragover"].forEach((t) =>
     els.drop.addEventListener(t, (e) => { e.preventDefault(); els.drop.classList.add("over"); }));
   ["dragleave", "drop"].forEach((t) =>
     els.drop.addEventListener(t, () => els.drop.classList.remove("over")));
   els.drop.addEventListener("drop", (e) => {
     e.preventDefault();
-    readFile(e.dataTransfer.files[0]);
+    readFiles(e.dataTransfer.files);
   });
   window.addEventListener("paste", (e) => {
     if (!isEdit()) return;
     const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
-    if (item) readFile(item.getAsFile());
+    if (item) readFiles([item.getAsFile()]);
   });
 
   els.model.addEventListener("change", syncMode);
@@ -582,10 +616,12 @@
 
     const prompt = els.prompt.value.trim();
     if (!prompt) { say("Write a prompt first.", true); els.prompt.focus(); return; }
-    if (isEdit() && !inputDataURL) { say("Choose an image to edit.", true); return; }
+    if (isEdit() && !inputs.length) { say("Choose an image to edit.", true); return; }
 
     const body = { model: model.name, prompt };
-    if (isEdit()) body.image = inputDataURL;
+    // One image stays a bare string, which is what every other client sends.
+    if (isEdit()) body.image = inputs.length > 1 ? inputs : inputs[0];
+    if (isEdit() && els.maskPrompt.value.trim()) body.mask_prompt = els.maskPrompt.value.trim();
     if (els.negative.value.trim()) body.negative_prompt = els.negative.value.trim();
     if (els.steps.value) body.steps = Number(els.steps.value);
     if (els.seed.value) body.seed = Number(els.seed.value);
@@ -607,7 +643,7 @@
         body: JSON.stringify(body),
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+      if (!r.ok) throw Object.assign(new Error(data.error || ("HTTP " + r.status)), { detail: data.detail });
 
       const src = "data:image/png;base64," + data.images[0];
       const secs = Math.round((Date.now() - started) / 1000);
@@ -616,16 +652,20 @@
       img.alt = prompt;
       // onload before src, so a cached/instant decode can't beat the handler.
       img.onload = () => {
-        els.meta.textContent = `${data.model} · ${img.naturalWidth}×${img.naturalHeight} · ${secs}s`;
+        els.meta.textContent = `${data.model} · ${img.naturalWidth}×${img.naturalHeight} · ${secs}s` +
+          (data.seed === undefined ? "" : ` · seed ${data.seed}`);
       };
+      // The seed is the only way back to a result you liked.
+      els.seedAgain.hidden = data.seed === undefined;
+      els.seedAgain.onclick = () => { els.seed.value = data.seed; };
       img.src = src;
       els.plate.appendChild(img);
       els.save.href = src;
       els.save.download = `oflux-${Date.now()}.png`;
-      els.reuse.hidden = !models.some((m) => m.mode === "edit");
+      els.reuse.hidden = !models.some(editable);
       els.reuse.onclick = () => {
-        setInput(src);
-        const editModel = models.find((m) => m.mode === "edit");
+        setInputs([src]);
+        const editModel = models.find(editable);
         if (!isEdit() && editModel) { els.model.value = editModel.name; syncMode(); }
         els.prompt.focus();
       };
@@ -634,6 +674,8 @@
     } catch (err) {
       els.plate.innerHTML = '<div class="empty"><span>That didn\'t run.</span></div>';
       say(String(err.message || err), true);
+      // The engine's own text is hundreds of lines; keep it out of the way.
+      els.note.title = err.detail || "";
     } finally {
       clearInterval(timer);
       busy = false;

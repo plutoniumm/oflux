@@ -5,18 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"oflux/internal/archdb"
 	"oflux/internal/types"
 )
-
-// component returns the first component with the given role from a manifest.
-func component(m types.Manifest, role types.Role) (types.Component, bool) {
-	for _, c := range m.Components {
-		if c.Role == role {
-			return c, true
-		}
-	}
-	return types.Component{}, false
-}
 
 func TestNamesSorted(t *testing.T) {
 	got := Names()
@@ -26,6 +17,7 @@ func TestNamesSorted(t *testing.T) {
 		"flux.1-krea",
 		"flux.1-schnell",
 		"flux.2-klein",
+		"flux.2-klein-9b",
 		"qwen-image",
 		"qwen-image-edit",
 		"z-image-turbo",
@@ -71,7 +63,7 @@ func TestResolveQwenImageEdit(t *testing.T) {
 		t.Fatalf("Name = %q, want qwen-image-edit", m.Name)
 	}
 
-	diff, ok := component(m, types.RoleDiffusion)
+	diff, ok := m.Component(types.RoleDiffusion)
 	if !ok {
 		t.Fatal("no diffusion component")
 	}
@@ -85,10 +77,10 @@ func TestResolveQwenImageEdit(t *testing.T) {
 		t.Fatalf("diffusion file still has {quant}: %q", diff.File)
 	}
 
-	if _, ok := component(m, types.RoleVAE); !ok {
+	if _, ok := m.Component(types.RoleVAE); !ok {
 		t.Fatal("no vae component")
 	}
-	if _, ok := component(m, types.RoleLLM); !ok {
+	if _, ok := m.Component(types.RoleLLM); !ok {
 		t.Fatal("no llm component")
 	}
 
@@ -98,11 +90,9 @@ func TestResolveQwenImageEdit(t *testing.T) {
 	}
 }
 
-func TestResolveQwenVAEOverride(t *testing.T) {
-	// The archdb default VAE filename lacks the split_files/vae/ prefix; the
-	// curated model overrides it with the real path.
+func TestResolveQwenVAE(t *testing.T) {
 	m, _ := Resolve("qwen-image-edit", "Q8_0")
-	vae, ok := component(m, types.RoleVAE)
+	vae, ok := m.Component(types.RoleVAE)
 	if !ok {
 		t.Fatal("no vae component")
 	}
@@ -119,7 +109,7 @@ func TestResolveFluxKontext(t *testing.T) {
 	if m.Mode != types.ModeEdit {
 		t.Fatalf("Mode = %q, want %q", m.Mode, types.ModeEdit)
 	}
-	diff, ok := component(m, types.RoleDiffusion)
+	diff, ok := m.Component(types.RoleDiffusion)
 	if !ok {
 		t.Fatal("no diffusion component")
 	}
@@ -130,12 +120,12 @@ func TestResolveFluxKontext(t *testing.T) {
 		t.Fatalf("diffusion file = %q", diff.File)
 	}
 	for _, role := range []types.Role{types.RoleVAE, types.RoleCLIPL, types.RoleT5XXL} {
-		if _, ok := component(m, role); !ok {
+		if _, ok := m.Component(role); !ok {
 			t.Fatalf("missing component role %q", role)
 		}
 	}
 	// t5xxl companion is quantized -> quant token substituted.
-	t5, _ := component(m, types.RoleT5XXL)
+	t5, _ := m.Component(types.RoleT5XXL)
 	if !strings.Contains(t5.File, "Q6_K") {
 		t.Fatalf("t5xxl file = %q, expected Q6_K substituted", t5.File)
 	}
@@ -149,29 +139,28 @@ func TestResolveZImageTurbo(t *testing.T) {
 	if m.Mode != types.ModeGenerate {
 		t.Fatalf("Mode = %q, want generate", m.Mode)
 	}
-	diff, _ := component(m, types.RoleDiffusion)
+	diff, _ := m.Component(types.RoleDiffusion)
 	if diff.Source != "leejet/Z-Image-Turbo-GGUF" {
 		t.Fatalf("diffusion source = %q", diff.Source)
 	}
 	if diff.File != "z_image_turbo-Q8_0.gguf" {
 		t.Fatalf("diffusion file = %q", diff.File)
 	}
-	if _, ok := component(m, types.RoleLLM); !ok {
+	if _, ok := m.Component(types.RoleLLM); !ok {
 		t.Fatal("no llm component")
 	}
 }
 
 func TestResolveQuantFallback(t *testing.T) {
-	// A quant not offered for the model falls back to the first curated quant.
-	m, ok := Resolve("flux.1-kontext", "Q2_K")
+	// A label the model does not publish walks archdb's chain; nothing in the
+	// table is unquantized, so an F16 request lands on the best quant there is.
+	m, ok := Resolve("flux.1-kontext", "F16")
 	if !ok {
 		t.Fatal("Resolve fallback not ok")
 	}
-	want, _ := Lookup("flux.1-kontext")
-	first := want.Quants[0]
-	diff, _ := component(m, types.RoleDiffusion)
-	if !strings.Contains(diff.File, first) {
-		t.Fatalf("fallback diffusion file = %q, want quant %q", diff.File, first)
+	diff, _ := m.Component(types.RoleDiffusion)
+	if !strings.Contains(diff.File, "Q8_0") {
+		t.Fatalf("fallback diffusion file = %q, want Q8_0", diff.File)
 	}
 }
 
@@ -187,9 +176,15 @@ func TestResolveNoQuantLeftover(t *testing.T) {
 	for _, name := range Names() {
 		mdl, _ := Lookup(name)
 		for _, q := range mdl.Quants {
-			man, ok := Resolve(name, q)
+			man, ok := Resolve(name, string(q))
 			if !ok {
 				t.Fatalf("Resolve(%s,%s) not ok", name, q)
+			}
+			arch, _ := archdb.ByName(mdl.Arch)
+			for _, role := range arch.Required {
+				if _, ok := man.Component(role); !ok {
+					t.Fatalf("%s@%s is missing required role %s", name, q, role)
+				}
 			}
 			for _, c := range man.Components {
 				if strings.Contains(c.File, "{quant}") {
@@ -230,7 +225,7 @@ func TestResolveFlux2Klein(t *testing.T) {
 		t.Error("klein must not use the flux2-dev Mistral encoder")
 	}
 	vae, _ := m.Component(types.RoleVAE)
-	if vae.Source != "Comfy-Org/flux2-klein" {
+	if vae.Source != "Comfy-Org/vae-text-encorder-for-flux-klein-4b" {
 		t.Errorf("vae should come from the ungated mirror, got %+v", vae)
 	}
 	// klein is few-step; the engine should launch with those defaults baked in.
@@ -238,6 +233,101 @@ func TestResolveFlux2Klein(t *testing.T) {
 	for _, want := range []string{"--steps 4", "--cfg-scale 1", "--diffusion-fa"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("engine flags %q missing %q", joined, want)
+		}
+	}
+}
+
+// Handing a 9B klein the 4B's encoder does not fail cleanly: the engine dies
+// with "'…q_norm.weight' not in model metadata" and a shape mismatch.
+func TestResolveFlux2Klein9B(t *testing.T) {
+	m, ok := Resolve("flux.2-klein-9b", "Q8_0")
+	if !ok {
+		t.Fatal("flux.2-klein-9b should resolve")
+	}
+	if m.Architecture != "flux2-klein" || m.Mode != types.ModeBoth {
+		t.Errorf("arch/mode = %s/%s", m.Architecture, m.Mode)
+	}
+	dif, _ := m.Component(types.RoleDiffusion)
+	if dif.Source != "leejet/FLUX.2-klein-9B-GGUF" || dif.File != "flux-2-klein-9b-Q8_0.gguf" {
+		t.Errorf("diffusion = %+v", dif)
+	}
+	llm, ok := m.Component(types.RoleLLM)
+	if !ok || llm.Source != "unsloth/Qwen3-8B-GGUF" || llm.File != "Qwen3-8B-Q8_0.gguf" {
+		t.Errorf("llm should be the Qwen3-8B encoder, got %+v", llm)
+	}
+	four, _ := Resolve("flux.2-klein", "Q8_0")
+	if llm4, _ := four.Component(types.RoleLLM); llm4.Source != "unsloth/Qwen3-4B-GGUF" {
+		t.Errorf("klein-4B llm = %+v", llm4)
+	}
+}
+
+// unsloth's Qwen3-8B has no Q4_0, so a Q4_0 klein-9B must not name one.
+func TestResolveCompanionQuantSafetyNet(t *testing.T) {
+	m, ok := Resolve("flux.2-klein-9b", "Q4_0")
+	if !ok {
+		t.Fatal("flux.2-klein-9b@Q4_0 should resolve")
+	}
+	dif, _ := m.Component(types.RoleDiffusion)
+	if dif.File != "flux-2-klein-9b-Q4_0.gguf" {
+		t.Errorf("diffusion = %q, want the requested Q4_0", dif.File)
+	}
+	llm, _ := m.Component(types.RoleLLM)
+	if llm.File != "Qwen3-8B-Q4_K_M.gguf" {
+		t.Errorf("llm = %q, want the nearest Q4 the encoder repo publishes", llm.File)
+	}
+}
+
+// Every curated quant must name a file its source actually publishes.
+func TestResolveCuratedQuantsArePublished(t *testing.T) {
+	published := map[string][]archdb.Quant{
+		"unsloth/Qwen-Image-Edit-2511-GGUF":        {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"QuantStack/FLUX.1-Kontext-dev-GGUF":       {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"QuantStack/FLUX.1-Krea-dev-GGUF":          {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"QuantStack/Qwen-Image-GGUF":               {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"city96/FLUX.1-dev-gguf":                   {"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
+		"city96/FLUX.1-schnell-gguf":               {"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
+		"leejet/FLUX.2-klein-4B-GGUF":              {"Q8_0", "Q4_0"},
+		"leejet/FLUX.2-klein-9B-GGUF":              {"Q8_0", "Q4_0"},
+		"leejet/Z-Image-Turbo-GGUF":                {"Q8_0", "Q6_K", "Q5_0", "Q4_K", "Q4_0", "Q3_K", "Q2_K"},
+		"city96/t5-v1_1-xxl-encoder-gguf":          {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S"},
+		"mradermacher/Qwen2.5-VL-7B-Instruct-GGUF": {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen3-4B-GGUF":                    {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen3-8B-GGUF":                    {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen3-4B-Instruct-2507-GGUF":      {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+	}
+	for _, name := range Names() {
+		mdl, _ := Lookup(name)
+		for _, q := range mdl.Quants {
+			man, _ := Resolve(name, string(q))
+			for _, c := range man.Components {
+				have, known := published[c.Source]
+				if !known {
+					continue // fixed single-file source (a VAE or CLIP)
+				}
+				got, ok := archdb.ParseQuant(c.File)
+				if !ok || !slices.Contains(have, got) {
+					t.Errorf("%s@%s: %s resolves %s/%s, which that repo does not publish", name, q, c.Role, c.Source, c.File)
+				}
+			}
+		}
+	}
+}
+
+// The friendly name hides which checkpoint a model actually is.
+func TestResolveBaseAndRevision(t *testing.T) {
+	cases := map[string][2]string{
+		"qwen-image-edit": {"Qwen-Image-Edit-2511", "2511"},
+		"flux.1-dev":      {"FLUX.1-dev", ""},
+		"flux.2-klein-9b": {"FLUX.2-klein-9B", ""},
+		"z-image-turbo":   {"Z-Image-Turbo", ""},
+	}
+	for name, want := range cases {
+		m, ok := Resolve(name, "Q8_0")
+		if !ok {
+			t.Fatalf("Resolve(%s) not ok", name)
+		}
+		if m.Base != want[0] || m.Revision != want[1] {
+			t.Errorf("%s: base/revision = %q/%q, want %q/%q", name, m.Base, m.Revision, want[0], want[1])
 		}
 	}
 }

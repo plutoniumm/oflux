@@ -1,15 +1,13 @@
-// Command fakeengine is a stand-in for the real sd-server binary, used only by
-// the supervisor package tests. It implements just enough of the sd-server
-// native async API (see api.md) for the supervisor to spawn it, health-probe
-// it, submit a job, poll to completion, and cancel.
+// Command fakeengine is a stand-in for sd-server, used only by the supervisor
+// tests. It implements just enough of the native async API (see api.md) to
+// spawn, probe, submit, poll and cancel, and honours --listen-ip/--listen-port
+// while ignoring every other flag the supervisor passes through.
 //
-// It accepts the same bind flags the supervisor passes to the real engine:
-// --listen-ip <ip> and --listen-port <port>. All other flags are ignored, so
-// the supervisor can pass through arbitrary manifest flags unchanged.
-//
-// Job lifecycle: the first GET of a job returns "generating"; the second and
-// later GETs return "completed" with a real 1x1 PNG base64-encoded at
-// result.images[0].b64_json, matching the shape confirmed from api.md.
+// The first GET of a job returns "generating", later ones "completed" with a 1x1
+// PNG at result.images[0].b64_json. Prompt keywords steer that: "hold" never
+// finishes, "fail" fails with a multi-line reason, and "progress" writes real
+// sd.cpp-shaped sampling bars to stdout, which the supervisor captures into the
+// model log it scrapes progress from.
 package main
 
 import (
@@ -31,16 +29,18 @@ type fakeServer struct {
 	mu        sync.Mutex
 	polls     map[string]int
 	cancelled map[string]bool
+	prompts   map[string]string
 	counter   int
 	pngB64    string
 }
+
+const sampleSteps = 4
 
 func main() {
 	host := "127.0.0.1"
 	port := ""
 
-	// Manual flag scan: recognise only the bind flags, ignore everything else
-	// (the supervisor passes real manifest flags through to the engine).
+	// Recognise only the bind flags; manifest flags pass through untouched.
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -64,6 +64,7 @@ func main() {
 	srv := &fakeServer{
 		polls:     map[string]int{},
 		cancelled: map[string]bool{},
+		prompts:   map[string]string{},
 		pngB64:    onePixelPNGBase64(),
 	}
 
@@ -107,10 +108,22 @@ func (s *fakeServer) imgGen(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	var body struct {
+		Prompt string `json:"prompt"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
 	s.mu.Lock()
 	s.counter++
 	id := fmt.Sprintf("job_%d", s.counter)
+	s.prompts[id] = body.Prompt
 	s.mu.Unlock()
+
+	// Lets tests tell "holds the slot" from "the engine has the job".
+	fmt.Printf("SUBMITTED %s\n", id)
+	if strings.Contains(body.Prompt, "progress") {
+		go emitSamplingBars()
+	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":       id,
@@ -134,6 +147,8 @@ func (s *fakeServer) cancel(w http.ResponseWriter, id string) {
 	s.mu.Lock()
 	s.cancelled[id] = true
 	s.mu.Unlock()
+	// On stdout so tests can prove a cancel reached the engine via the log.
+	fmt.Printf("CANCELLED %s\n", id)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "cancelled"})
 }
 
@@ -142,24 +157,41 @@ func (s *fakeServer) getJob(w http.ResponseWriter, id string) {
 	s.polls[id]++
 	n := s.polls[id]
 	cancelled := s.cancelled[id]
+	prompt := s.prompts[id]
 	s.mu.Unlock()
 
 	status := "generating"
 	var result json.RawMessage
+	var jobErr any
+	done := n >= 2 && !strings.Contains(prompt, "hold")
 	switch {
 	case cancelled:
 		status = "cancelled"
-	case n >= 2:
+	case done && strings.Contains(prompt, "fail"):
+		status = "failed"
+		jobErr = "ggml_metal_graph_compute: command buffer 0 failed\nstack trace line 1\nstack trace line 2"
+	case done:
 		status = "completed"
 		result = json.RawMessage(fmt.Sprintf(`{"output_format":"png","images":[{"index":0,"b64_json":%q}]}`, s.pngB64))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":      id,
-		"kind":    "img_gen",
-		"status":  status,
-		"created": time.Now().Unix(),
-		"result":  result,
-		"error":   nil,
+		"id":             id,
+		"kind":           "img_gen",
+		"status":         status,
+		"queue_position": 0,
+		"created":        time.Now().Unix(),
+		"result":         result,
+		"error":          jobErr,
 	})
+}
+
+// The same shape sd.cpp emits, including the tensor-loading bar the supervisor
+// has to tell apart from sampling.
+func emitSamplingBars() {
+	fmt.Printf("\r  |##########| 219/219 - 1.14GB/s\x1b[K\n")
+	for i := 1; i <= sampleSteps; i++ {
+		fmt.Printf("\r  |=====>    | %d/%d - 6.79s/it\x1b[K", i, sampleSteps)
+		time.Sleep(40 * time.Millisecond)
+	}
 }

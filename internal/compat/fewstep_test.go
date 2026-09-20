@@ -53,23 +53,10 @@ func TestFewStepDefaults(t *testing.T) {
 	}
 }
 
-// rapidAIOFetcher mimics a GGUF repo that publishes many builds of the same
-// model — the shape that made quant-only selection pick an arbitrary version.
-type rapidAIOFetcher struct{ paths []string }
-
-func (f rapidAIOFetcher) Tree(ctx context.Context, repo, rev string) ([]types.HFFile, error) {
-	out := make([]types.HFFile, 0, len(f.paths))
-	for _, p := range f.paths {
-		out = append(out, types.HFFile{Path: p, IsLFS: true, LFSOID: "deadbeef", Size: 1})
-	}
-	return out, nil
-}
-
-func (f rapidAIOFetcher) ReadFile(ctx context.Context, repo, rev, path string, max int64) ([]byte, error) {
-	return nil, context.Canceled // no diffusers config; forces keyword detection
-}
-
-var rapidRepo = rapidAIOFetcher{paths: []string{
+// rapidRepo mimics a GGUF repo that publishes many builds of the same model —
+// the shape that made quant-only selection pick an arbitrary version. It has no
+// diffusers config, so arch detection falls back to keywords.
+var rapidRepo = fakeRepo{paths: []string{
 	"v11.1/Qwen-Rapid-AIO-NSFW-v11.1_Q8_0.gguf",
 	"v19/Qwen-Rapid-AIO-NSFW-v19_Q8_0.gguf",
 	"v23/Qwen-Rapid-NSFW-v23_Q8_0.gguf",

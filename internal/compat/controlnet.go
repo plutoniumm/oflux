@@ -38,12 +38,8 @@ func AttachControlNet(ctx context.Context, f RepoFetcher, m *types.Manifest, rep
 	}
 	var candidates []string
 	for _, fl := range files {
-		low := strings.ToLower(path.Base(fl.Path))
-		for _, ext := range controlNetExts {
-			if strings.HasSuffix(low, ext) {
-				candidates = append(candidates, fl.Path)
-				break
-			}
+		if hasAnySuffix(path.Base(fl.Path), controlNetExts...) {
+			candidates = append(candidates, fl.Path)
 		}
 	}
 
@@ -77,13 +73,9 @@ func AttachControlNet(ctx context.Context, f RepoFetcher, m *types.Manifest, rep
 	// so argv keeps role flags and value placeholders adjacent.
 	if !slices.Contains(m.Engine.Flags, "{control_net}") {
 		flags := slices.Clone(m.Engine.Flags)
-		at := len(flags)
-		for i, fl := range flags {
-			if strings.HasPrefix(fl, "--cfg-scale") || strings.HasPrefix(fl, "--steps") ||
-				strings.HasPrefix(fl, "--flow-shift") || strings.HasPrefix(fl, "--sampling-method") {
-				at = i
-				break
-			}
+		at := slices.IndexFunc(flags, archdb.IsSamplingFlag)
+		if at < 0 {
+			at = len(flags)
 		}
 		m.Engine.Flags = slices.Insert(flags, at,
 			archdb.FlagName(types.RoleControlNet), "{control_net}")

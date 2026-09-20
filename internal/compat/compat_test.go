@@ -3,8 +3,10 @@ package compat
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
+	"oflux/internal/archdb"
 	"oflux/internal/types"
 )
 
@@ -51,15 +53,6 @@ func compByRole(t *testing.T, m *types.Manifest, role types.Role) types.Componen
 		t.Fatalf("manifest missing component for role %q", role)
 	}
 	return c
-}
-
-func hasNote(notes []string, want string) bool {
-	for _, n := range notes {
-		if n == want {
-			return true
-		}
-	}
-	return false
 }
 
 func hasBlocker(bs []types.Blocker, kind types.BlockerKind) (types.Blocker, bool) {
@@ -116,7 +109,7 @@ func TestInspect_FluxGGUFMirror(t *testing.T) {
 	if t5.File != "t5-v1_1-xxl-encoder-Q8_0.gguf" || t5.Source != "city96/t5-v1_1-xxl-encoder-gguf" {
 		t.Errorf("t5xxl companion = %+v (want {quant} filled with Q8_0)", t5)
 	}
-	if !hasNote(v.Notes, "quant: Q8_0") {
+	if !slices.Contains(v.Notes, "quant: Q8_0") {
 		t.Errorf("notes = %v, want quant: Q8_0", v.Notes)
 	}
 	if len(v.Manifest.Engine.Flags) == 0 {
@@ -267,7 +260,7 @@ func TestSelectQuant(t *testing.T) {
 		cands    []string
 		pref     []string
 		wantFile string
-		wantQ    string
+		wantQ    archdb.Quant
 		wantOK   bool
 	}{
 		{
@@ -293,11 +286,29 @@ func TestSelectQuant(t *testing.T) {
 			wantOK:   true,
 		},
 		{
-			name:     "case insensitive",
+			name:     "case insensitive, canonical label",
 			cands:    []string{"M-Q8_0.GGUF"},
 			pref:     []string{"q8_0"},
 			wantFile: "M-Q8_0.GGUF",
-			wantQ:    "q8_0",
+			wantQ:    "Q8_0",
+			wantOK:   true,
+		},
+		{
+			// Q4_K_M must never be reported as the Q4_K inside it: the label is
+			// reused to build companion filenames.
+			name:   "sized K-quant is not its bare label",
+			cands:  []string{"m-Q4_K_M.gguf"},
+			pref:   []string{"Q4_K"},
+			wantOK: false,
+		},
+		{
+			// A label archdb does not know still matches by name, so a user can
+			// ask for an exotic quant by hand.
+			name:     "unknown label falls back to substring",
+			cands:    []string{"m-IQ4_XS.gguf"},
+			pref:     []string{"IQ4_XS"},
+			wantFile: "m-IQ4_XS.gguf",
+			wantQ:    "IQ4_XS",
 			wantOK:   true,
 		},
 		{
@@ -315,7 +326,7 @@ func TestSelectQuant(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			file, quant, ok := SelectQuant(tt.cands, tt.pref)
+			file, quant, ok := selectQuant(tt.cands, quantPrefs(tt.pref))
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -343,7 +354,7 @@ func TestDetectArch(t *testing.T) {
 			},
 		}
 		files := hf("model_index.json", "x.gguf")
-		a, ok, err := DetectArch(ctx, f, repo, files)
+		a, ok, err := detectArch(ctx, f, repo, files)
 		if err != nil || !ok {
 			t.Fatalf("ok=%v err=%v", ok, err)
 		}
@@ -360,7 +371,7 @@ func TestDetectArch(t *testing.T) {
 			},
 		}
 		files := hf("config.json", "model.safetensors")
-		a, ok, err := DetectArch(ctx, f, repo, files)
+		a, ok, err := detectArch(ctx, f, repo, files)
 		if err != nil || !ok {
 			t.Fatalf("ok=%v err=%v", ok, err)
 		}
@@ -373,7 +384,7 @@ func TestDetectArch(t *testing.T) {
 		repo := "someone/Qwen-Image-Edit-GGUF"
 		f := &fakeFetcher{}
 		files := hf("qwen_image_edit-Q8_0.gguf")
-		a, ok, err := DetectArch(ctx, f, repo, files)
+		a, ok, err := detectArch(ctx, f, repo, files)
 		if err != nil || !ok {
 			t.Fatalf("ok=%v err=%v", ok, err)
 		}
@@ -386,7 +397,7 @@ func TestDetectArch(t *testing.T) {
 		repo := "org/nothing"
 		f := &fakeFetcher{}
 		files := hf("weights.bin")
-		_, ok, err := DetectArch(ctx, f, repo, files)
+		_, ok, err := detectArch(ctx, f, repo, files)
 		if err != nil {
 			t.Fatalf("err = %v", err)
 		}
@@ -423,5 +434,114 @@ func TestSuggestedGGUFRepo(t *testing.T) {
 		if got := suggestedGGUFRepo(tt.arch); got != tt.want {
 			t.Errorf("suggestedGGUFRepo(%q) = %q, want %q", tt.arch, got, tt.want)
 		}
+	}
+}
+
+// The bug a real user hit: an underscored klein-9B matched no keyword, fell
+// through to the flux2 arch and got flux2-dev's Mistral-3 encoder.
+func TestInspect_Flux2Klein9BUnderscores(t *testing.T) {
+	repo := "someone/flux2-klein-gguf"
+	f := &fakeFetcher{tree: map[string][]types.HFFile{
+		repo: hf("flux2_klein_9b_Q8_0.gguf", "README.md"),
+	}}
+	v, err := Inspect(context.Background(), f, repo, defaultQuantPref)
+	if err != nil {
+		t.Fatalf("Inspect error: %v", err)
+	}
+	if !v.Compatible {
+		t.Fatalf("expected compatible, got blockers: %+v", v.Blockers)
+	}
+	if v.Manifest.Architecture != "flux2-klein" {
+		t.Fatalf("architecture = %q, want flux2-klein", v.Manifest.Architecture)
+	}
+	llm := compByRole(t, v.Manifest, types.RoleLLM)
+	if llm.Source != "unsloth/Qwen3-8B-GGUF" || llm.File != "Qwen3-8B-Q8_0.gguf" {
+		t.Errorf("llm = %+v, want the Qwen3-8B encoder", llm)
+	}
+	repo4 := "someone/flux2-klein-gguf"
+	f4 := &fakeFetcher{tree: map[string][]types.HFFile{
+		repo4: hf("flux2_klein_4b_Q8_0.gguf"),
+	}}
+	v4, _ := Inspect(context.Background(), f4, repo4, defaultQuantPref)
+	llm4 := compByRole(t, v4.Manifest, types.RoleLLM)
+	if llm4.Source != "unsloth/Qwen3-4B-GGUF" {
+		t.Errorf("klein-4B llm = %+v", llm4)
+	}
+}
+
+// compat already walks every tree the puller would; recording sha256 and size
+// here saves fetching them all again.
+func TestInspect_FillsComponentHashAndSize(t *testing.T) {
+	repo := "city96/FLUX.1-dev-gguf"
+	f := &fakeFetcher{tree: map[string][]types.HFFile{
+		repo: {
+			{Path: "flux1-dev-Q8_0.gguf", IsLFS: true, LFSOID: "aaaa", Size: 123},
+			{Path: "config.json", OID: "gitsha1", Size: 7},
+		},
+		"ffxvs/vae-flux": {
+			{Path: "ae.safetensors", IsLFS: true, LFSOID: "bbbb", Size: 456},
+		},
+	}}
+	v, err := Inspect(context.Background(), f, repo, defaultQuantPref)
+	if err != nil || !v.Compatible {
+		t.Fatalf("Inspect: %v %+v", err, v.Blockers)
+	}
+	dif := compByRole(t, v.Manifest, types.RoleDiffusion)
+	if dif.SHA256 != "aaaa" || dif.Size != 123 {
+		t.Errorf("diffusion sha/size = %q/%d", dif.SHA256, dif.Size)
+	}
+	vae := compByRole(t, v.Manifest, types.RoleVAE)
+	if vae.SHA256 != "bbbb" || vae.Size != 456 {
+		t.Errorf("companion sha/size = %q/%d", vae.SHA256, vae.Size)
+	}
+	t5 := compByRole(t, v.Manifest, types.RoleT5XXL)
+	if t5.SHA256 != "" || t5.Size != 0 {
+		t.Errorf("unknown file should carry no hash: %+v", t5)
+	}
+}
+
+// A git oid is a sha1, not a sha256, and must never be recorded as one.
+func TestInspect_NonLFSFileHasNoSHA256(t *testing.T) {
+	repo := "org/sdxl-gguf"
+	f := &fakeFetcher{tree: map[string][]types.HFFile{
+		repo: {{Path: "sdxl-Q8_0.gguf", OID: "gitsha1", Size: 9}},
+	}}
+	v, _ := Inspect(context.Background(), f, repo, defaultQuantPref)
+	dif := compByRole(t, v.Manifest, types.RoleDiffusion)
+	if dif.SHA256 != "" {
+		t.Errorf("SHA256 = %q, want empty for a non-LFS file", dif.SHA256)
+	}
+	if dif.Size != 9 {
+		t.Errorf("Size = %d, want 9", dif.Size)
+	}
+}
+
+func TestInspect_BaseAndRevision(t *testing.T) {
+	repo := "QuantStack/Qwen-Image-Edit-GGUF"
+	f := &fakeFetcher{tree: map[string][]types.HFFile{
+		repo: hf("qwen-image-edit-2509-Q8_0.gguf"),
+	}}
+	v, _ := Inspect(context.Background(), f, repo, defaultQuantPref)
+	if v.Manifest.Base != "Qwen-Image-Edit" {
+		t.Errorf("base = %q", v.Manifest.Base)
+	}
+	if v.Manifest.Revision != "2509" {
+		t.Errorf("revision = %q, want 2509", v.Manifest.Revision)
+	}
+}
+
+// The two views of one fact must not drift apart.
+func TestDiffusionExcludeCoversEveryRoleKeyword(t *testing.T) {
+	for role, kws := range roleKeywords {
+		for _, kw := range kws {
+			if !slices.Contains(diffusionExcludeTokens, kw) {
+				t.Errorf("role %s keyword %q would still be a diffusion candidate", role, kw)
+			}
+		}
+	}
+	files := hf("flux1-dev-Q8_0.gguf", "t5xxl_fp16.safetensors", "clip_l.safetensors", "qwen_image_vae.safetensors", "mmproj-f16.gguf")
+	got := diffusionCandidates(files)
+	if len(got) != 1 || got[0] != "flux1-dev-Q8_0.gguf" {
+		t.Errorf("diffusionCandidates = %v", got)
 	}
 }

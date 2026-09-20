@@ -4,7 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
+	"reflect"
 	"testing"
 	"time"
 
@@ -20,23 +20,25 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
-func TestValidLoraName(t *testing.T) {
-	ok := []string{"qwen-edit-lightning-4step", "a", "style_v1.0", "Flux-Turbo-8"}
+func TestValidName(t *testing.T) {
+	policies := []func(string) error{ValidName, ValidModelName, ValidLoraName}
+	ok := []string{"qwen-edit-lightning-4step", "a", "style_v1.0", "Flux-Turbo-8",
+		"flux.1-kontext", "qwen-image-edit-2511", "an installed name"}
 	for _, n := range ok {
-		if err := ValidLoraName(n); err != nil {
-			t.Errorf("ValidLoraName(%q) = %v, want nil", n, err)
+		for _, valid := range policies {
+			if err := valid(n); err != nil {
+				t.Errorf("%q rejected: %v", n, err)
+			}
 		}
 	}
-	// A LoRA name becomes a filename handed to the engine, so anything that
-	// could escape the loras directory or name a file outside it must be
-	// rejected before it reaches disk.
-	bad := []string{
-		"", "..", "../../etc/passwd", "a/b", `a\b`, ".hidden", "-leading",
-		"has space", "quote'd", "semi;colon", strings.Repeat("x", 65),
-	}
+	// A name becomes a path segment, and for a LoRA the filename handed to the
+	// engine, so nothing that could name a file outside its directory passes.
+	bad := []string{"", "..", "../../etc/passwd", "a/b", `a\b`, "v1..2"}
 	for _, n := range bad {
-		if err := ValidLoraName(n); err == nil {
-			t.Errorf("ValidLoraName(%q) = nil, want an error", n)
+		for _, valid := range policies {
+			if err := valid(n); err == nil {
+				t.Errorf("%q accepted, want an error", n)
+			}
 		}
 	}
 }
@@ -173,10 +175,72 @@ func TestGCLeavesLorasAlone(t *testing.T) {
 	if err := s.PutLora("keeper", src); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GC(); err != nil {
+	if _, _, err := s.TryGC(); err != nil {
 		t.Fatal(err)
 	}
 	if !s.HasLora("keeper") {
 		t.Fatal("GC deleted an installed lora")
+	}
+}
+
+func TestLoraMetadataSidecar(t *testing.T) {
+	s := newTestStore(t)
+	src := filepath.Join(t.TempDir(), "incoming.bin")
+	if err := os.WriteFile(src, []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutLora("distill", src); err != nil {
+		t.Fatal(err)
+	}
+
+	// An adapter dropped in by hand has no sidecar and must still list.
+	if got, err := s.ReadLoraMeta("distill"); err != nil || !reflect.DeepEqual(got, LoraMeta{}) {
+		t.Fatalf("ReadLoraMeta without a sidecar = %+v, %v", got, err)
+	}
+
+	want := LoraMeta{
+		Name: "distill", Source: "org/repo", File: "sub/distill.safetensors",
+		For: []string{"qwen-image-edit"}, Steps: 4, CFG: 1.0,
+	}
+	if err := s.WriteLoraMeta(want); err != nil {
+		t.Fatalf("WriteLoraMeta: %v", err)
+	}
+	got, err := s.ReadLoraMeta("distill")
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadLoraMeta = %+v, %v; want %+v", got, err, want)
+	}
+
+	// The sidecar is not an adapter: it must not appear as a second LoRA.
+	list, err := s.ListLoras()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Name != "distill" {
+		t.Fatalf("ListLoras = %+v, want just distill", list)
+	}
+	if list[0].Steps != 4 || list[0].CFG != 1.0 || !reflect.DeepEqual(list[0].For, want.For) {
+		t.Errorf("ListLoras row lost its metadata: %+v", list[0])
+	}
+
+	// A stale sidecar would hand this adapter's sampling regime to whatever is
+	// installed next under the same name.
+	if err := s.RemoveLora("distill"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ReadLoraMeta("distill"); err != nil || !reflect.DeepEqual(got, LoraMeta{}) {
+		t.Errorf("sidecar survived RemoveLora: %+v, %v", got, err)
+	}
+}
+
+func TestListLorasSkipsNonAdapters(t *testing.T) {
+	s := newTestStore(t)
+	for _, name := range []string{"a.json", "notes.txt", "b.safetensors.part"} {
+		if err := os.WriteFile(filepath.Join(s.LorasDir(), name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListLoras()
+	if err != nil || len(got) != 0 {
+		t.Fatalf("ListLoras = %+v, %v; want none", got, err)
 	}
 }

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"oflux/internal/hfclient"
+	"oflux/internal/registry"
 	"oflux/internal/store"
 	"oflux/internal/types"
 )
@@ -137,5 +139,108 @@ func TestPullIncompatibleRepo(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not compatible") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+func TestComponentSHAUsesTheVerdictChecksum(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("hub hit for %s though the verdict already carried the checksum", r.URL.Path)
+		http.Error(w, "no", http.StatusNotFound)
+	}))
+	defer hub.Close()
+	p := newPuller(t, hub)
+
+	want := strings.Repeat("ab", 32)
+	sha, size := p.componentSHA(context.Background(), map[string][]types.HFFile{}, types.Component{
+		Role: types.RoleDiffusion, Source: "org/repo", File: "w.gguf", SHA256: want, Size: 42,
+	})
+	if sha != want || size != 42 {
+		t.Fatalf("componentSHA = %q, %d; want %q, 42", sha, size, want)
+	}
+}
+
+func TestComponentSHAFallsBackToTheRepoTree(t *testing.T) {
+	content := []byte("DIFFUSION-WEIGHTS")
+	sum := sha256.Sum256(content)
+	hub := fakeHub(map[string]map[string][]byte{"org/repo": {"w.gguf": content}})
+	defer hub.Close()
+	p := newPuller(t, hub)
+
+	for _, c := range []types.Component{
+		{Source: "org/repo", File: "w.gguf"},
+		// A git blob oid is a sha1: as an expected checksum it would fail every
+		// transfer it guards, so it must not be mistaken for content identity.
+		{Source: "org/repo", File: "w.gguf", SHA256: strings.Repeat("a", 40)},
+	} {
+		sha, size := p.componentSHA(context.Background(), map[string][]types.HFFile{}, c)
+		if sha != hex.EncodeToString(sum[:]) || size != int64(len(content)) {
+			t.Errorf("componentSHA(%+v) = %q, %d", c, sha, size)
+		}
+	}
+}
+
+func TestPullLoraRecordsCuratedMetadata(t *testing.T) {
+	l, ok := registry.LookupLora("qwen-edit-lightning-4step")
+	if !ok {
+		t.Fatal("curated lora missing from the registry")
+	}
+	hub := fakeHub(map[string]map[string][]byte{l.Source: {l.File: []byte("ADAPTER")}})
+	defer hub.Close()
+	p := newPuller(t, hub)
+
+	name, err := p.PullLora(context.Background(), l.Name, LoraOpts{}, nil)
+	if err != nil {
+		t.Fatalf("PullLora: %v", err)
+	}
+	meta, err := p.store.ReadLoraMeta(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.LoraMeta{
+		Name: l.Name, Source: l.Source, File: l.File,
+		For: l.Archs, Steps: l.Steps, CFG: l.CFG,
+	}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("sidecar = %+v, want the registry's pins %+v", meta, want)
+	}
+	rows, err := p.store.ListLoras()
+	if err != nil || len(rows) != 1 || rows[0].Steps != l.Steps {
+		t.Fatalf("ListLoras = %+v, %v", rows, err)
+	}
+}
+
+func TestPullLoraFromRepoRecordsCallerMetadata(t *testing.T) {
+	hub := fakeHub(map[string]map[string][]byte{"org/style": {"style-v2.safetensors": []byte("ADAPTER")}})
+	defer hub.Close()
+	p := newPuller(t, hub)
+
+	name, err := p.PullLora(context.Background(), "org/style", LoraOpts{
+		As: "my-style", For: []string{"flux"}, Steps: 8, CFG: 1.0,
+	}, nil)
+	if err != nil {
+		t.Fatalf("PullLora: %v", err)
+	}
+	meta, err := p.store.ReadLoraMeta(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.LoraMeta{
+		Name: "my-style", Source: "org/style", File: "style-v2.safetensors",
+		For: []string{"flux"}, Steps: 8, CFG: 1.0,
+	}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("sidecar = %+v, want %+v", meta, want)
+	}
+}
+
+func TestQuantPrefPutsTheRequestedQuantFirst(t *testing.T) {
+	for _, want := range []string{"Q8_0", "Q4_K_M", "some-vendor-quant"} {
+		got := quantPref(want)
+		if len(got) == 0 || got[0] != want {
+			t.Errorf("quantPref(%q) = %v", want, got)
+		}
+	}
+	if len(quantPref("")) == 0 {
+		t.Error("quantPref(\"\") must still offer a fallback chain")
 	}
 }

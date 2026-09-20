@@ -1,20 +1,20 @@
 // Package supervisor spawns and reaps sd-server subprocesses, one per model, and
-// drives generation requests through them via the engineclient HTTP client.
-//
-// sd-server is treated as an opaque bundled binary: the supervisor only ever
-// launches it with CLI flags and talks to it over its native HTTP API. Models
-// are loaded lazily on first use, capped at MaxLoaded (least-recently-used
-// eviction), and unloaded after IdleTTL of inactivity.
+// drives generation requests through them. sd-server is an opaque bundled
+// binary: the supervisor only launches it with CLI flags and talks to its HTTP
+// API. Models load lazily, are capped at MaxLoaded (LRU eviction), and unload
+// after IdleTTL.
 package supervisor
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +23,6 @@ import (
 	"oflux/internal/types"
 )
 
-// Options configures a Supervisor.
 type Options struct {
 	EnginePath   string                   // path to the sd-server binary
 	IdleTTL      time.Duration            // unload after this much inactivity; default 15m
@@ -32,43 +31,59 @@ type Options struct {
 	BlobPath     func(blob string) string // resolves a Component.Blob to an absolute file path
 	Host         string                   // engine bind host; default "127.0.0.1"
 	StartTimeout time.Duration            // health-probe timeout; default 120s
-	// LoraDir is handed to the engine as --lora-model-dir. Requests reference
-	// adapters in it by filename, so every model gets the same directory and
-	// LoRAs need no reload to become available.
-	LoraDir string
+	// LoraDir is the engine's --lora-model-dir. Requests name adapters in it by
+	// filename, so every model shares it and a new LoRA needs no reload.
+	LoraDir       string
+	MaxConcurrent int // generations at once per loaded model; default 1, see gate
+	QueueDepth    int // requests that may wait per model; default 8, <=0 unbounded
 }
 
-// runner is one live sd-server subprocess.
+// cancel and timer are set before a runner is published, so every runner in
+// Supervisor.runners has them.
 type runner struct {
 	name     string
-	cmd      *exec.Cmd
 	cancel   context.CancelFunc
 	client   *engineclient.Client
-	logFile  *os.File
-	logPath  string
 	lastUsed time.Time
-	inFlight int
 	timer    *time.Timer
+	logPath  string // stdout+stderr; progress.go scrapes sampling progress from it
+	// ttl starts at Options.IdleTTL and GenOpts.KeepAlive can replace it, so
+	// "keep this warm" is a property of the model, not of one request.
+	ttl time.Duration
 
-	// dead is set by the reaper goroutine once the process has exited (whether
-	// we killed it or it crashed on its own). Guarded by Supervisor.mu.
-	dead bool
-	// done is closed after the process has exited and been reaped.
-	done chan struct{}
+	dead bool          // process exited, killed or crashed; guarded by Supervisor.mu
+	done chan struct{} // closed once the process has exited and been reaped
 }
 
-// Supervisor manages a set of sd-server subprocesses.
 type Supervisor struct {
 	mu      sync.Mutex
 	runners map[string]*runner
-	// loading holds an in-progress load per model name; the channel is closed
-	// when that load finishes. It lets concurrent callers wait for a load
-	// without holding mu (a load can take minutes).
+	// loading holds an in-progress load per model, closed when it finishes, so
+	// concurrent callers can wait without holding mu (a load takes minutes).
 	loading map[string]chan struct{}
+	// pending counts requests queued or running per model, loaded or not.
+	// Eviction and reaping consult it, so one model's request can never pull
+	// the weights out from under another model's waiting queue.
+	gates   map[string]*gate
+	pending map[string]int
 	opts    Options
+
+	// jobsMu guards the registry and every field of the jobs in it. It is never
+	// held together with mu: the registry knows nothing about model lifecycle,
+	// so nesting would only add an order to get wrong.
+	jobsMu sync.Mutex
+	jobs   map[string]*job
 }
 
-// New returns a Supervisor with defaults applied for any zero-valued option.
+type GenOpts struct {
+	// KeepAlive overrides IdleTTL for this model's idle timer: 0 keeps the
+	// configured value, negative pins the model until something unloads it.
+	// Chained edits otherwise reload ~22GB of weights between turns.
+	KeepAlive time.Duration
+	// OnStep may fire from another goroutine, never after the call returns.
+	OnStep func(step, total int)
+}
+
 func New(opts Options) *Supervisor {
 	if opts.IdleTTL <= 0 {
 		opts.IdleTTL = 15 * time.Minute
@@ -85,15 +100,26 @@ func New(opts Options) *Supervisor {
 	if opts.BlobPath == nil {
 		opts.BlobPath = func(blob string) string { return blob }
 	}
+	if opts.MaxConcurrent <= 0 {
+		opts.MaxConcurrent = 1
+	}
+	if opts.QueueDepth == 0 {
+		opts.QueueDepth = 8
+	}
+	if opts.LogDir == "" {
+		// An invariant, not a per-path conditional. See spawn for why.
+		opts.LogDir = os.TempDir()
+	}
 	return &Supervisor{
 		runners: make(map[string]*runner),
 		loading: make(map[string]chan struct{}),
+		gates:   make(map[string]*gate),
+		pending: make(map[string]int),
+		jobs:    make(map[string]*job),
 		opts:    opts,
 	}
 }
 
-// placeholderRoles maps a "{role}" flag token to the role whose component path
-// should be substituted in its place.
 var placeholderRoles = map[string]types.Role{
 	"{diffusion}":   types.RoleDiffusion,
 	"{vae}":         types.RoleVAE,
@@ -104,16 +130,11 @@ var placeholderRoles = map[string]types.Role{
 	"{control_net}": types.RoleControlNet,
 }
 
-// buildArgs turns a manifest into the argv for sd-server: the engine flags with
-// {role} placeholders resolved to on-disk blob paths, followed by --model-args
-// entries (sorted for determinism), the LoRA directory, then the bind flags.
-// The bind flags are --listen-ip / --listen-port, as verified from
-// stable-diffusion.cpp's server (examples/server/README.md + main.cpp:
-// listen_ip / listen_port).
+// buildArgs resolves {role} placeholders to blob paths, appends --model-args
+// (sorted for determinism) and the LoRA dir, then the bind flags. Those are
+// --listen-ip / --listen-port, verified from stable-diffusion.cpp's server
+// (examples/server/README.md + main.cpp: listen_ip / listen_port).
 func buildArgs(m types.Manifest, blobPath func(string) string, host, port, loraDir string) ([]string, error) {
-	if blobPath == nil {
-		blobPath = func(blob string) string { return blob }
-	}
 	args := make([]string, 0, len(m.Engine.Flags)+2*len(m.Engine.ModelArgs)+4)
 	for _, f := range m.Engine.Flags {
 		if role, ok := placeholderRoles[f]; ok {
@@ -127,16 +148,11 @@ func buildArgs(m types.Manifest, blobPath func(string) string, host, port, loraD
 		args = append(args, f)
 	}
 	if len(m.Engine.ModelArgs) > 0 {
-		keys := make([]string, 0, len(m.Engine.ModelArgs))
-		for k := range m.Engine.ModelArgs {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		// sd-server takes a single --model-args with a comma-separated key=value
-		// list (not a repeated flag), per `sd-server --help`.
-		pairs := make([]string, len(keys))
-		for i, k := range keys {
-			pairs[i] = fmt.Sprintf("%s=%v", k, m.Engine.ModelArgs[k])
+		// sd-server takes ONE --model-args with a comma-separated key=value
+		// list, not a repeated flag, per `sd-server --help`.
+		pairs := make([]string, 0, len(m.Engine.ModelArgs))
+		for _, k := range slices.Sorted(maps.Keys(m.Engine.ModelArgs)) {
+			pairs = append(pairs, fmt.Sprintf("%s=%v", k, m.Engine.ModelArgs[k]))
 		}
 		args = append(args, "--model-args", strings.Join(pairs, ","))
 	}
@@ -147,10 +163,34 @@ func buildArgs(m types.Manifest, blobPath func(string) string, host, port, loraD
 	return args, nil
 }
 
-// Generate ensures m is loaded, submits req, waits for completion and returns
-// the first result image's bytes. It resets the model's idle timer. If ctx is
-// cancelled while waiting, the underlying job is cancelled best-effort.
-func (s *Supervisor) Generate(ctx context.Context, m types.Manifest, req engineclient.ImgGenRequest) ([]byte, error) {
+// Generate returns the first image as RAW base64 PNG: the engine sends base64
+// and oflux sends base64 out, so a decode here is only re-encoded upstream.
+func (s *Supervisor) Generate(ctx context.Context, m types.Manifest, req engineclient.ImgGenRequest, opts GenOpts) (string, error) {
+	t, err := s.enqueue(m.Name)
+	if err != nil {
+		return "", err
+	}
+	imgs, err := s.run(ctx, m, req, opts, nil, t)
+	if err != nil {
+		return "", err
+	}
+	return imgs[0], nil
+}
+
+// run owns the ticket it is given; j, when non-nil, is its registry entry.
+func (s *Supervisor) run(ctx context.Context, m types.Manifest, req engineclient.ImgGenRequest, opts GenOpts, j *job, t *ticket) ([]string, error) {
+	defer s.release(t)
+	if err := t.wait(ctx); err != nil {
+		return nil, err
+	}
+	if j != nil {
+		s.jobsMu.Lock()
+		if j.status == statusQueued {
+			j.status = statusRunning
+		}
+		s.jobsMu.Unlock()
+	}
+
 	// ensureLoaded may spawn an engine and wait minutes for it to become
 	// healthy; it deliberately does not hold s.mu for that.
 	r, err := s.ensureLoaded(ctx, m)
@@ -159,12 +199,10 @@ func (s *Supervisor) Generate(ctx context.Context, m types.Manifest, req enginec
 	}
 
 	s.mu.Lock()
-	r.inFlight++
-	r.lastUsed = time.Now()
-	if r.timer != nil {
-		r.timer.Reset(s.opts.IdleTTL)
-	}
+	r.ttl = cmp.Or(opts.KeepAlive, s.opts.IdleTTL)
+	s.touchLocked(r, true)
 	client := r.client
+	logPath := r.logPath
 	name := m.Name
 	s.mu.Unlock()
 
@@ -175,58 +213,52 @@ func (s *Supervisor) Generate(ctx context.Context, m types.Manifest, req enginec
 	defer func() {
 		s.mu.Lock()
 		if rr, found := s.runners[name]; found && rr == r {
-			if rr.inFlight > 0 {
-				rr.inFlight--
-			}
-			if ok {
-				rr.lastUsed = time.Now()
-			}
-			if rr.timer != nil {
-				rr.timer.Reset(s.opts.IdleTTL)
-			}
+			s.touchLocked(rr, ok)
 		}
 		s.mu.Unlock()
 	}()
 
-	job, err := client.Submit(ctx, req)
+	if opts.OnStep != nil {
+		tailCtx, stopTail := context.WithCancel(context.Background())
+		tailDone := make(chan struct{})
+		go func() {
+			defer close(tailDone)
+			tailProgress(tailCtx, logPath, opts.OnStep)
+		}()
+		// Joining the tailer is what makes the GenOpts.OnStep promise true.
+		defer func() { stopTail(); <-tailDone }()
+	}
+
+	eng, err := client.Submit(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	job, err = client.Wait(ctx, job.ID, 250*time.Millisecond)
+	if j != nil {
+		s.jobsMu.Lock()
+		j.engineID, j.client = eng.ID, client
+		s.jobsMu.Unlock()
+	}
+	eng, err = client.Wait(ctx, eng.ID, pollInterval)
 	if err != nil {
 		return nil, err
 	}
-	switch job.Status {
-	case "completed":
-		imgs, err := job.ImagesPNG()
-		if err != nil {
-			return nil, err
-		}
-		if len(imgs) == 0 {
-			return nil, fmt.Errorf("supervisor: engine returned no images")
-		}
-		ok = true
-		return imgs[0], nil
-	case "failed":
-		return nil, fmt.Errorf("supervisor: engine job failed: %s", job.Error)
-	default:
-		return nil, fmt.Errorf("supervisor: engine job ended with status %q", job.Status)
+	if eng.Status != "completed" {
+		return nil, &engineclient.JobError{Op: "img_gen", Status: eng.Status, Reason: eng.Error}
 	}
+	imgs, err := eng.ImagesB64()
+	if err != nil {
+		return nil, err
+	}
+	ok = true
+	return imgs, nil
 }
 
-// Loaded returns the names of currently running models, sorted.
 func (s *Supervisor) Loaded() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	names := make([]string, 0, len(s.runners))
-	for n := range s.runners {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(s.runners))
 }
 
-// Unload stops the runner for name immediately.
 func (s *Supervisor) Unload(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -234,22 +266,20 @@ func (s *Supervisor) Unload(name string) error {
 	if !ok {
 		return fmt.Errorf("supervisor: model %q not loaded", name)
 	}
-	s.stopRunnerLocked(r)
-	delete(s.runners, name)
+	s.dropLocked(r)
 	return nil
 }
 
-// Shutdown stops all runners.
-// Shutdown stops all runners and waits (briefly) for the engine processes to
-// actually exit. Waiting matters: sd-server is not killed by its parent dying,
-// so returning early would leave multi-GB engines orphaned.
+// Shutdown waits (briefly) for the engines to actually exit: sd-server is not
+// killed by its parent dying, so returning early orphans multi-GB processes.
 func (s *Supervisor) Shutdown() {
+	s.cancelAllJobs()
+
 	s.mu.Lock()
 	stopped := make([]*runner, 0, len(s.runners))
-	for name, r := range s.runners {
-		s.stopRunnerLocked(r)
+	for _, r := range s.runners {
 		stopped = append(stopped, r)
-		delete(s.runners, name)
+		s.dropLocked(r)
 	}
 	s.mu.Unlock()
 
@@ -263,13 +293,9 @@ func (s *Supervisor) Shutdown() {
 	}
 }
 
-// ensureLoaded returns a live runner for m, spawning sd-server if needed.
-//
-// s.mu is NOT held while the engine spawns and health-probes — that can take
-// minutes for a large checkpoint, and holding the lock would block Loaded(),
-// Unload(), Shutdown() and every other request for the duration. Concurrent
-// callers for the same model wait on a shared latch instead of each spawning
-// their own engine.
+// s.mu is NOT held while the engine spawns and health-probes: that takes minutes
+// for a large checkpoint and would block every other call. Concurrent callers
+// for one model wait on a shared latch rather than each spawning an engine.
 func (s *Supervisor) ensureLoaded(ctx context.Context, m types.Manifest) (*runner, error) {
 	for {
 		s.mu.Lock()
@@ -278,11 +304,8 @@ func (s *Supervisor) ensureLoaded(ctx context.Context, m types.Manifest) (*runne
 				s.mu.Unlock()
 				return r, nil
 			}
-			// The engine exited on its own (crash / OOM kill). Drop the corpse
-			// and fall through to spawn a fresh one, so the model self-heals
-			// instead of failing every subsequent request.
-			s.stopRunnerLocked(r)
-			delete(s.runners, m.Name)
+			// Crash or OOM kill: drop the corpse so the model self-heals.
+			s.dropLocked(r)
 		}
 		if ch, loading := s.loading[m.Name]; loading {
 			s.mu.Unlock()
@@ -290,8 +313,6 @@ func (s *Supervisor) ensureLoaded(ctx context.Context, m types.Manifest) (*runne
 			case <-ch: // another caller's load finished; re-check the map
 				continue
 			case <-ctx.Done():
-				// The caller gave up; the load continues in the background so
-				// the next request benefits from it.
 				return nil, ctx.Err()
 			}
 		}
@@ -309,30 +330,25 @@ func (s *Supervisor) ensureLoaded(ctx context.Context, m types.Manifest) (*runne
 			s.mu.Unlock()
 			return nil, err
 		}
-		r.timer = time.AfterFunc(s.opts.IdleTTL, func() { s.reap(m.Name) })
+		r.timer = time.AfterFunc(r.ttl, func() { s.reap(m.Name) })
 		s.runners[m.Name] = r
 		s.mu.Unlock()
 		return r, nil
 	}
 }
 
-// evictForLoadLocked frees capacity for one more model, never evicting a runner
-// with a request in flight — killing a busy engine would fail a user's
-// in-progress generation and throw away minutes of GPU work. If every runner is
-// busy we temporarily exceed MaxLoaded rather than do that. Callers hold s.mu.
+// Never evicts a model with queued or in-flight work, which would throw away
+// minutes of GPU work; if all are busy it overshoots MaxLoaded instead.
 func (s *Supervisor) evictForLoadLocked() {
 	for len(s.runners) >= s.opts.MaxLoaded {
 		victim := s.lruIdleLocked()
 		if victim == nil {
 			return // all loaded models are busy; allow a temporary overshoot
 		}
-		s.stopRunnerLocked(victim)
-		delete(s.runners, victim.name)
+		s.dropLocked(victim)
 	}
 }
 
-// spawn starts an engine for m and waits for it to become healthy. It does not
-// touch supervisor state, so it is safe to call without s.mu held.
 func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 	port, err := freePort(s.opts.Host)
 	if err != nil {
@@ -342,10 +358,8 @@ func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.opts.LogDir != "" {
-		if err := os.MkdirAll(s.opts.LogDir, 0o755); err != nil {
-			return nil, fmt.Errorf("supervisor: create log dir: %w", err)
-		}
+	if err := os.MkdirAll(s.opts.LogDir, 0o755); err != nil {
+		return nil, fmt.Errorf("supervisor: create log dir: %w", err)
 	}
 	logPath := filepath.Join(s.opts.LogDir, m.Name+".log")
 	logFile, err := os.Create(logPath)
@@ -358,11 +372,7 @@ func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 	// sd-server writes scratch files to its working directory. Under launchd /
 	// LaunchServices the inherited cwd is "/", which the user can't write, and
 	// the engine then fails every request with a 500. Run it in a writable dir.
-	if s.opts.LogDir != "" {
-		cmd.Dir = s.opts.LogDir
-	} else {
-		cmd.Dir = os.TempDir()
-	}
+	cmd.Dir = s.opts.LogDir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -373,17 +383,15 @@ func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 
 	r := &runner{
 		name:     m.Name,
-		cmd:      cmd,
 		cancel:   cancel,
 		client:   engineclient.New("http://" + net.JoinHostPort(s.opts.Host, port)),
-		logFile:  logFile,
-		logPath:  logPath,
 		lastUsed: time.Now(),
+		logPath:  logPath,
+		ttl:      s.opts.IdleTTL,
 		done:     make(chan struct{}),
 	}
 
-	// One goroutine owns Wait(): it reaps the child (no zombies) and records
-	// that the process is gone, whether we killed it or it died on its own.
+	// One goroutine owns Wait(): it reaps the child and records its death.
 	go func() {
 		_ = cmd.Wait()
 		s.mu.Lock()
@@ -393,9 +401,8 @@ func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 		close(r.done)
 	}()
 
-	// The probe is bounded by StartTimeout, NOT by the requesting client's
-	// context: a client that times out or disconnects must not kill an engine
-	// that is still loading (the next request would restart it from scratch).
+	// Bounded by StartTimeout, NOT the client's context: a client that gives up
+	// must not kill an engine that is still loading.
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), s.opts.StartTimeout)
 	defer probeCancel()
 	if err := s.probe(probeCtx, r); err != nil {
@@ -407,10 +414,8 @@ func (s *Supervisor) spawn(m types.Manifest) (*runner, error) {
 	return r, nil
 }
 
-// probe polls the engine's Capabilities endpoint until it answers, ctx expires,
-// or the process dies. Watching for process death turns an engine that exits
-// immediately (bad flags, missing weights) into a fast, clear failure instead of
-// a StartTimeout-long wait.
+// Watching for process death turns an engine that exits at once (bad flags,
+// missing weights) into a fast failure instead of a StartTimeout-long wait.
 func (s *Supervisor) probe(ctx context.Context, r *runner) error {
 	var lastErr error
 	for {
@@ -430,9 +435,6 @@ func (s *Supervisor) probe(ctx context.Context, r *runner) error {
 	}
 }
 
-// reap stops a runner once it has been idle for IdleTTL. Skips (and reschedules)
-// while a generation is in flight or the runner was used more recently than
-// IdleTTL ago.
 func (s *Supervisor) reap(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -440,20 +442,17 @@ func (s *Supervisor) reap(name string) {
 	if !ok {
 		return
 	}
-	if r.inFlight > 0 || time.Since(r.lastUsed) < s.opts.IdleTTL {
-		r.timer.Reset(s.opts.IdleTTL)
+	if r.ttl < 0 || s.pending[name] > 0 || time.Since(r.lastUsed) < r.ttl {
+		s.touchLocked(r, false)
 		return
 	}
-	s.stopRunnerLocked(r)
-	delete(s.runners, name)
+	s.dropLocked(r)
 }
 
-// lruIdleLocked returns the least-recently-used runner that has no request in
-// flight, or nil if every runner is busy. Callers must hold s.mu.
 func (s *Supervisor) lruIdleLocked() *runner {
 	var oldest *runner
 	for _, r := range s.runners {
-		if r.inFlight > 0 {
+		if s.pending[r.name] > 0 {
 			continue
 		}
 		if oldest == nil || r.lastUsed.Before(oldest.lastUsed) {
@@ -463,19 +462,25 @@ func (s *Supervisor) lruIdleLocked() *runner {
 	return oldest
 }
 
-// stopRunnerLocked signals a runner's process to die. It does not wait: the
-// per-runner reaper goroutine calls Wait and closes the log, so the supervisor
-// mutex is never held across a process teardown. Callers must hold s.mu.
-func (s *Supervisor) stopRunnerLocked(r *runner) {
-	if r.timer != nil {
-		r.timer.Stop()
-	}
-	if r.cancel != nil {
-		r.cancel()
-	}
+// dropLocked does not wait: the per-runner reaper goroutine calls Wait and
+// closes the log, so s.mu is never held across a process teardown.
+func (s *Supervisor) dropLocked(r *runner) {
+	r.timer.Stop()
+	r.cancel()
+	delete(s.runners, r.name)
 }
 
-// freePort asks the OS for a free TCP port on host and returns it as a string.
+func (s *Supervisor) touchLocked(r *runner, used bool) {
+	if used {
+		r.lastUsed = time.Now()
+	}
+	if r.ttl < 0 {
+		r.timer.Stop() // keep_alive < 0: resident until something unloads it
+		return
+	}
+	r.timer.Reset(r.ttl)
+}
+
 func freePort(host string) (string, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
@@ -489,14 +494,13 @@ func freePort(host string) (string, error) {
 	return port, nil
 }
 
-// tailFile returns up to max trailing bytes of the file at path, or "" on error.
-func tailFile(path string, max int) string {
+func tailFile(path string, n int) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	if len(data) > max {
-		data = data[len(data)-max:]
+	if len(data) > n {
+		data = data[len(data)-n:]
 	}
 	return string(data)
 }

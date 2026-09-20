@@ -4,6 +4,9 @@
 //
 //	<root>/blobs/sha256-<hex>   content-addressed weight files
 //	<root>/manifests/<name>.json installed-model descriptions
+//	<root>/loras/<name>.safetensors  LoRA adapters, addressed by name
+//	<root>/loras/<name>.json     what an adapter is for (archs, steps, cfg)
+//	<root>/presets/<name>.json   saved request defaults
 //	<root>/logs/                 daemon/engine logs
 //	<root>/config.json           daemon configuration
 //
@@ -18,7 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,11 +29,9 @@ import (
 	"oflux/internal/types"
 )
 
-// ErrManifestNotFound is returned by ReadManifest when no manifest with the
-// requested name is installed.
+// ErrManifestNotFound is returned when no such manifest is installed.
 var ErrManifestNotFound = errors.New("store: manifest not found")
 
-// Store is a handle to an on-disk oflux model store rooted at a directory.
 type Store struct {
 	root string
 	// gcMu orders garbage collection against in-progress pulls. A pull holds it
@@ -49,8 +50,7 @@ func (s *Store) BeginWrite() func() {
 	return s.gcMu.RUnlock
 }
 
-// Open roots the store at root, creating blobs/, manifests/ and logs/ if they
-// are missing. When root is empty it uses $OFLUX_HOME if set, otherwise
+// Open creates the store's directories. An empty root means $OFLUX_HOME, else
 // ~/.oflux.
 func Open(root string) (*Store, error) {
 	if root == "" {
@@ -65,7 +65,7 @@ func Open(root string) (*Store, error) {
 		}
 	}
 	s := &Store{root: root}
-	for _, dir := range []string{s.root, s.BlobsDir(), s.ManifestsDir(), s.LogsDir(), s.LorasDir()} {
+	for _, dir := range []string{s.root, s.BlobsDir(), s.ManifestsDir(), s.LogsDir(), s.LorasDir(), s.PresetsDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("store: create %s: %w", dir, err)
 		}
@@ -73,53 +73,34 @@ func Open(root string) (*Store, error) {
 	return s, nil
 }
 
-// Root returns the store's root directory.
 func (s *Store) Root() string { return s.root }
 
-// BlobsDir returns the directory holding content-addressed blobs.
 func (s *Store) BlobsDir() string { return filepath.Join(s.root, "blobs") }
 
-// ManifestsDir returns the directory holding installed-model manifests.
 func (s *Store) ManifestsDir() string { return filepath.Join(s.root, "manifests") }
 
-// LogsDir returns the directory for daemon and engine logs.
 func (s *Store) LogsDir() string { return filepath.Join(s.root, "logs") }
 
-// LorasDir returns the directory holding installed LoRA adapters.
-//
 // LoRAs are stored under their friendly name rather than content-addressed like
 // weights: the engine is handed this directory as --lora-model-dir and resolves
 // each request's LoRA by filename, so the name on disk IS the API identifier.
 func (s *Store) LorasDir() string { return filepath.Join(s.root, "loras") }
 
-// BlobName converts a hex sha256 (optionally already prefixed with "sha256:"
-// or "sha256-") into the on-disk blob filename "sha256-<hex>".
+// BlobName normalizes a hex sha256, with or without a "sha256:"/"sha256-"
+// prefix, to the on-disk blob filename.
 func BlobName(sha256hex string) string {
-	h := sha256hex
-	switch {
-	case strings.HasPrefix(h, "sha256:"):
-		h = strings.TrimPrefix(h, "sha256:")
-	case strings.HasPrefix(h, "sha256-"):
-		h = strings.TrimPrefix(h, "sha256-")
-	}
+	h, _ := strings.CutPrefix(sha256hex, "sha256:")
+	h, _ = strings.CutPrefix(h, "sha256-")
 	return "sha256-" + h
 }
 
-// BlobPath returns the absolute path for a blob address. It accepts either a
-// full "sha256-<hex>" name or a bare hex string.
 func (s *Store) BlobPath(blob string) string {
 	return filepath.Join(s.BlobsDir(), BlobName(blob))
 }
 
-// HasBlob reports whether the blob is present in the store.
-func (s *Store) HasBlob(blob string) bool {
-	info, err := os.Stat(s.BlobPath(blob))
-	return err == nil && !info.IsDir()
-}
+func (s *Store) HasBlob(blob string) bool { return isFile(s.BlobPath(blob)) }
 
-// PutBlob moves the file at srcPath into the blob store under the address
-// derived from sha256hex. It is idempotent: if the blob already exists it
-// removes srcPath and returns the existing name.
+// PutBlob is idempotent: an existing blob wins and srcPath is removed.
 func (s *Store) PutBlob(sha256hex, srcPath string) (string, error) {
 	name := BlobName(sha256hex)
 	dst := filepath.Join(s.BlobsDir(), name)
@@ -135,41 +116,45 @@ func (s *Store) PutBlob(sha256hex, srcPath string) (string, error) {
 	if err := os.MkdirAll(s.BlobsDir(), 0o755); err != nil {
 		return "", fmt.Errorf("store: ensure blobs dir: %w", err)
 	}
-
-	if err := os.Rename(srcPath, dst); err != nil {
-		// Cross-device rename (EXDEV) can't be done atomically; fall back to a
-		// copy + remove.
-		if isCrossDevice(err) {
-			// Copy to a temp file and rename into place, never straight to the
-			// content address: a copy interrupted by a full disk or a kill
-			// would otherwise leave truncated bytes at a valid-looking blob
-			// name, which HasBlob would then trust forever.
-			tmp := dst + ".incoming"
-			if cerr := copyFile(srcPath, tmp); cerr != nil {
-				_ = os.Remove(tmp)
-				return "", fmt.Errorf("store: copy blob: %w", cerr)
-			}
-			if rerr := os.Rename(tmp, dst); rerr != nil {
-				_ = os.Remove(tmp)
-				return "", fmt.Errorf("store: move copied blob into place: %w", rerr)
-			}
-			if rerr := os.Remove(srcPath); rerr != nil && !os.IsNotExist(rerr) {
-				return "", fmt.Errorf("store: remove src after copy: %w", rerr)
-			}
-			return name, nil
-		}
+	if err := placeFile(srcPath, dst); err != nil {
 		return "", fmt.Errorf("store: move blob into place: %w", err)
 	}
 	return name, nil
 }
 
-// isCrossDevice reports whether err is an EXDEV cross-device link error, which
-// os.Rename returns when src and dst live on different filesystems.
-func isCrossDevice(err error) bool {
-	return errors.Is(err, syscall.EXDEV)
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
-// copyFile copies src to dst, creating dst with 0644 permissions.
+// placeFile moves src onto dst, consuming src.
+//
+// A cross-device rename (EXDEV) can't be done atomically, so it falls back to a
+// copy. The copy goes to a temp file next to dst and is then renamed into
+// place, never straight to the final name: a copy interrupted by a full disk or
+// a kill would otherwise leave truncated bytes under a name the store trusts
+// forever — a content address HasBlob believes, or a LoRA filename the engine
+// loads.
+func placeFile(src, dst string) error {
+	err := os.Rename(src, dst)
+	if err == nil || !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	tmp := dst + ".incoming"
+	if err := copyFile(src, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("copy to %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit copy: %w", err)
+	}
+	if err := os.Remove(src); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove src after copy: %w", err)
+	}
+	return nil
+}
+
 func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
@@ -194,104 +179,145 @@ func copyFile(src, dst string) (err error) {
 	return out.Sync()
 }
 
-// ValidModelName reports whether name is usable as a manifest name, explaining
-// why if not. A manifest name becomes a path segment under manifests/.
-func ValidModelName(name string) error {
-	if name == "" {
-		return errors.New("store: empty manifest name")
+// writeJSONAtomic writes via a temp file plus rename: in place, a crash leaves
+// a truncated file, and one unparsable manifest fails ListManifests — and so
+// GC — for the whole store.
+func writeJSONAtomic(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
 	}
-	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		return fmt.Errorf("store: invalid manifest name %q", name)
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
 	return nil
 }
 
-// manifestPath returns the on-disk path for a manifest name, rejecting names
-// that contain path separators or "..".
-func (s *Store) manifestPath(name string) (string, error) {
-	if err := ValidModelName(name); err != nil {
-		return "", err
+// readJSON reports whether the file existed; a missing one is not an error.
+func readJSON(path string, v any) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	return filepath.Join(s.ManifestsDir(), name+".json"), nil
+	if err := json.Unmarshal(data, v); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
-// WriteManifest writes m to manifests/<name>.json as pretty JSON.
+const jsonExt = ".json"
+
+// ValidName reports whether name is usable as a model, LoRA or preset name.
+// All three become a path segment under the store, and a LoRA name is also the
+// filename sd-server resolves against --lora-model-dir, so separators and ".."
+// are refused. Nothing else is: model names come from Hugging Face repo ids and
+// from --as, and a stricter charset would reject names that install fine today.
+func ValidName(name string) error {
+	if name == "" {
+		return errors.New("store: empty name")
+	}
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return fmt.Errorf("store: invalid name %q: must not contain '/', '\\' or '..'", name)
+	}
+	return nil
+}
+
+// ValidModelName is ValidName, spelled the way its call sites read.
+func ValidModelName(name string) error { return ValidName(name) }
+
+// pathFor is the only place a caller-supplied name becomes a path, so the name
+// policy cannot drift between manifests, LoRAs and presets.
+func (s *Store) pathFor(dir, name, ext string) (string, error) {
+	if err := ValidName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name+ext), nil
+}
+
+func (s *Store) manifestPath(name string) (string, error) {
+	return s.pathFor(s.ManifestsDir(), name, jsonExt)
+}
+
 func (s *Store) WriteManifest(m types.Manifest) error {
 	path, err := s.manifestPath(m.Name)
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return fmt.Errorf("store: marshal manifest %q: %w", m.Name, err)
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(s.ManifestsDir(), 0o755); err != nil {
-		return fmt.Errorf("store: ensure manifests dir: %w", err)
-	}
-	// Write atomically: a manifest truncated by a crash would be unparsable,
-	// and one bad file makes ListManifests (and therefore GC) fail for the
-	// whole store.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := writeJSONAtomic(path, m); err != nil {
 		return fmt.Errorf("store: write manifest %q: %w", m.Name, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("store: commit manifest %q: %w", m.Name, err)
 	}
 	return nil
 }
 
-// ReadManifest reads manifests/<name>.json. It returns ErrManifestNotFound if
-// no such manifest exists.
+// ReadManifest returns ErrManifestNotFound if no such manifest exists.
 func (s *Store) ReadManifest(name string) (types.Manifest, error) {
 	path, err := s.manifestPath(name)
 	if err != nil {
 		return types.Manifest{}, err
 	}
-	data, err := os.ReadFile(path)
+	var m types.Manifest
+	found, err := readJSON(path, &m)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return types.Manifest{}, fmt.Errorf("%q: %w", name, ErrManifestNotFound)
-		}
 		return types.Manifest{}, fmt.Errorf("store: read manifest %q: %w", name, err)
 	}
-	var m types.Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return types.Manifest{}, fmt.Errorf("store: parse manifest %q: %w", name, err)
+	if !found {
+		return types.Manifest{}, fmt.Errorf("%q: %w", name, ErrManifestNotFound)
 	}
 	return m, nil
 }
 
-// ListManifests returns all installed manifests, sorted by Name.
-func (s *Store) ListManifests() ([]types.Manifest, error) {
+// eachManifest is the single reader of the manifest directory: ListManifests
+// sorts what it yields, GC only wants the blob names.
+func (s *Store) eachManifest(fn func(path string, m types.Manifest)) error {
 	entries, err := os.ReadDir(s.ManifestsDir())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil
 		}
-		return nil, fmt.Errorf("store: list manifests: %w", err)
+		return fmt.Errorf("store: list manifests: %w", err)
 	}
-	var out []types.Manifest
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), jsonExt) {
 			continue
 		}
-		name := strings.TrimSuffix(e.Name(), ".json")
-		m, err := s.ReadManifest(name)
+		path := filepath.Join(s.ManifestsDir(), e.Name())
+		var m types.Manifest
+		found, err := readJSON(path, &m)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("store: read manifest %s: %w", e.Name(), err)
 		}
-		out = append(out, m)
+		if !found {
+			continue // removed while we were listing
+		}
+		fn(path, m)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return nil
+}
+
+// ListManifests returns all installed manifests, sorted by Name.
+func (s *Store) ListManifests() ([]types.Manifest, error) {
+	var out []types.Manifest
+	if err := s.eachManifest(func(_ string, m types.Manifest) { out = append(out, m) }); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b types.Manifest) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
 }
 
-// RemoveManifest deletes the named manifest and then garbage-collects any blobs
-// that no remaining manifest references. It returns the freed blob names and
-// whether collection actually ran.
+// RemoveManifest deletes the manifest, then collects the blobs no remaining
+// manifest references, reporting the freed names and whether it ran at all.
 //
 // Collection is skipped rather than waited for when a pull is in flight. GC has
 // to exclude in-progress downloads, and a multi-gigabyte pull holds that lock
@@ -303,67 +329,74 @@ func (s *Store) RemoveManifest(name string) (freed []string, collected bool, err
 	if err != nil {
 		return nil, false, err
 	}
-	// Confirm the manifest set is readable BEFORE deleting anything: if some
-	// other manifest is unparsable, GC would fail and we'd have deleted this
-	// one with its blobs left orphaned and un-collectable.
-	if _, err := s.referencedBlobs(); err != nil {
+	if !s.gcMu.TryLock() {
+		// A pull is in flight, so nothing may be swept.
+		return nil, false, removeManifestFile(path, name)
+	}
+	defer s.gcMu.Unlock()
+
+	// Survey the SURVIVING manifests before deleting anything: if one of them
+	// is unparsable the sweep cannot run, and having already deleted this one
+	// would leave its blobs orphaned with nothing left to name them. It is also
+	// why the manifest directory is walked once per removal, not twice.
+	referenced, err := s.referencedBlobs(path)
+	if err != nil {
 		return nil, false, err
 	}
-	if err := os.Remove(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, fmt.Errorf("%q: %w", name, ErrManifestNotFound)
-		}
-		return nil, false, fmt.Errorf("store: remove manifest %q: %w", name, err)
+	if err := removeManifestFile(path, name); err != nil {
+		return nil, false, err
 	}
-	return s.TryGC()
+	freed, err = s.sweep(referenced)
+	return freed, true, err
 }
 
-// TryGC runs garbage collection only if no pull currently holds the store,
-// reporting collected=false when it backed off instead of waiting.
+func removeManifestFile(path, name string) error {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%q: %w", name, ErrManifestNotFound)
+		}
+		return fmt.Errorf("store: remove manifest %q: %w", name, err)
+	}
+	return nil
+}
+
+// TryGC removes any blob not referenced by an installed manifest and returns
+// the freed blob names, sorted. It runs only if no pull currently holds the
+// store, reporting collected=false when it backed off instead of waiting.
 func (s *Store) TryGC() (freed []string, collected bool, err error) {
 	if !s.gcMu.TryLock() {
 		return nil, false, nil
 	}
 	defer s.gcMu.Unlock()
-	freed, err = s.gcLocked()
+	referenced, err := s.referencedBlobs("")
+	if err != nil {
+		return nil, true, err
+	}
+	freed, err = s.sweep(referenced)
 	return freed, true, err
 }
 
-// referencedBlobs returns the set of blob names referenced by any installed
-// manifest's components.
-func (s *Store) referencedBlobs() (map[string]bool, error) {
-	manifests, err := s.ListManifests()
-	if err != nil {
-		return nil, err
-	}
-	set := make(map[string]bool)
-	for _, m := range manifests {
-		for _, c := range m.Components {
-			if c.Blob == "" {
-				continue
-			}
-			set[BlobName(c.Blob)] = true
+// referencedBlobs ignores the manifest at skipPath: the one being removed.
+func (s *Store) referencedBlobs(skipPath string) (map[string]bool, error) {
+	referenced := make(map[string]bool)
+	err := s.eachManifest(func(path string, m types.Manifest) {
+		if path == skipPath {
+			return
 		}
-	}
-	return set, nil
-}
-
-// GC removes any blob not referenced by an installed manifest and returns the
-// freed blob names, sorted. It waits for any in-progress pull to finish; use
-// TryGC to back off instead of waiting.
-func (s *Store) GC() ([]string, error) {
-	// Wait for any in-progress pull to commit its manifest first.
-	s.gcMu.Lock()
-	defer s.gcMu.Unlock()
-	return s.gcLocked()
-}
-
-// gcLocked is GC with s.gcMu already held.
-func (s *Store) gcLocked() ([]string, error) {
-	referenced, err := s.referencedBlobs()
+		for _, c := range m.Components {
+			if c.Blob != "" {
+				referenced[BlobName(c.Blob)] = true
+			}
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
+	return referenced, nil
+}
+
+// sweep requires s.gcMu held.
+func (s *Store) sweep(referenced map[string]bool) ([]string, error) {
 	entries, err := os.ReadDir(s.BlobsDir())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -373,54 +406,32 @@ func (s *Store) gcLocked() ([]string, error) {
 	}
 	var freed []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || referenced[e.Name()] {
 			continue
 		}
-		name := e.Name()
-		if referenced[name] {
-			continue
+		if err := os.Remove(filepath.Join(s.BlobsDir(), e.Name())); err != nil {
+			return nil, fmt.Errorf("store: gc remove %s: %w", e.Name(), err)
 		}
-		if err := os.Remove(filepath.Join(s.BlobsDir(), name)); err != nil {
-			return nil, fmt.Errorf("store: gc remove %s: %w", name, err)
-		}
-		freed = append(freed, name)
+		freed = append(freed, e.Name())
 	}
-	sort.Strings(freed)
+	slices.Sort(freed)
 	return freed, nil
 }
 
-// configPath returns the path to the store's config file.
 func (s *Store) configPath() string { return filepath.Join(s.root, "config.json") }
 
-// LoadConfig returns the store's configuration. When config.json is absent it
-// returns types.DefaultConfig(); otherwise the file is merged over the
-// defaults so unspecified fields keep their default values.
+// LoadConfig merges config.json over types.DefaultConfig(), so an unspecified
+// field keeps its default.
 func (s *Store) LoadConfig() (types.Config, error) {
 	cfg := types.DefaultConfig()
-	data, err := os.ReadFile(s.configPath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
-		}
+	if _, err := readJSON(s.configPath(), &cfg); err != nil {
 		return types.Config{}, fmt.Errorf("store: read config: %w", err)
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return types.Config{}, fmt.Errorf("store: parse config: %w", err)
 	}
 	return cfg, nil
 }
 
-// SaveConfig writes cfg to config.json at the store root as pretty JSON.
 func (s *Store) SaveConfig(cfg types.Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("store: marshal config: %w", err)
-	}
-	data = append(data, '\n')
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
-		return fmt.Errorf("store: ensure root: %w", err)
-	}
-	if err := os.WriteFile(s.configPath(), data, 0o644); err != nil {
+	if err := writeJSONAtomic(s.configPath(), cfg); err != nil {
 		return fmt.Errorf("store: write config: %w", err)
 	}
 	return nil

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"oflux/internal/hfclient"
@@ -26,12 +27,15 @@ import (
 
 // App holds the constructed subsystems.
 type App struct {
-	Store      *store.Store
-	Sup        *supervisor.Supervisor
-	Puller     *puller.Puller
-	Server     *server.Server
-	Cfg        types.Config
+	Store  *store.Store
+	Sup    *supervisor.Supervisor
+	Server *server.Server
+	Cfg    types.Config
+
 	enginePath string
+	// exePath is os.Executable's answer with symlinks left unresolved, which is
+	// the form resolveEngineFrom needs.
+	exePath string
 }
 
 // Setup opens the store, loads config, locates the engine, and constructs the
@@ -47,22 +51,26 @@ func Setup() (*App, error) {
 		return nil, err
 	}
 
-	enginePath, engErr := ResolveEnginePath()
+	// os.Executable's error needs no handling: resolveEngineFrom treats "" as
+	// "no idea where I am" and falls back to $PATH.
+	exe, _ := os.Executable()
+	enginePath, engErr := resolveEngineFrom(exe)
 	if engErr != nil {
 		fmt.Fprintln(os.Stderr, "warning:", engErr, "(pull works; generation will fail until the engine is available)")
 	}
 
-	idle, err := time.ParseDuration(cfg.IdleTTL)
-	if err != nil || idle <= 0 {
-		idle = 15 * time.Minute
-	}
+	// An unparseable or non-positive TTL lands on supervisor.New's own default,
+	// so there is nothing to fix up here.
+	idle, _ := time.ParseDuration(cfg.IdleTTL)
 	sup := supervisor.New(supervisor.Options{
-		EnginePath: enginePath,
-		IdleTTL:    idle,
-		MaxLoaded:  cfg.MaxLoaded,
-		LogDir:     st.LogsDir(),
-		BlobPath:   st.BlobPath,
-		LoraDir:    st.LorasDir(),
+		EnginePath:    enginePath,
+		IdleTTL:       idle,
+		MaxLoaded:     cfg.MaxLoaded,
+		MaxConcurrent: cfg.MaxConcurrent,
+		QueueDepth:    cfg.QueueDepth,
+		LogDir:        st.LogsDir(),
+		BlobPath:      st.BlobPath,
+		LoraDir:       st.LorasDir(),
 		// Large diffusion checkpoints (12-20B) take minutes to load into Metal;
 		// give the startup health-probe generous headroom before giving up.
 		StartTimeout: 10 * time.Minute,
@@ -71,11 +79,11 @@ func Setup() (*App, error) {
 	hf := hfclient.New(cfg.HFToken)
 	pl := puller.New(hf, st)
 	srv := server.New(st, sup, pl, cfg)
-	return &App{Store: st, Sup: sup, Puller: pl, Server: srv, Cfg: cfg, enginePath: enginePath}, nil
+	return &App{Store: st, Sup: sup, Server: srv, Cfg: cfg, enginePath: enginePath, exePath: exe}, nil
 }
 
 // Addr is the daemon listen address.
-func (a *App) Addr() string { return fmt.Sprintf("127.0.0.1:%d", a.Cfg.Port) }
+func (a *App) Addr() string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(a.Cfg.Port)) }
 
 // Serve runs the HTTP server until ctx is cancelled, then shuts the supervisor
 // down. It returns nil on a clean shutdown.
@@ -98,13 +106,8 @@ func (a *App) Serve(ctx context.Context) error {
 
 	// Repair a bundle left half-swapped by an update that was interrupted
 	// (logout, reboot, force-quit) so the app can never be stranded.
-	if exe, err := os.Executable(); err == nil {
-		if resolved, e := filepath.EvalSymlinks(exe); e == nil {
-			exe = resolved
-		}
-		if msg := updater.Recover(updater.AppPathFromExe(exe)); msg != "" {
-			fmt.Fprintln(os.Stderr, "oflux:", msg)
-		}
+	if msg := updater.Recover(updater.AppPathFromExe(realPath(a.exePath))); msg != "" {
+		fmt.Fprintln(os.Stderr, "oflux:", msg)
 	}
 
 	httpSrv := &http.Server{Handler: a.Server.Handler()}
@@ -117,7 +120,7 @@ func (a *App) Serve(ctx context.Context) error {
 
 	errCh := make(chan error, len(lns))
 	for _, ln := range lns {
-		go func(l net.Listener) { errCh <- httpSrv.Serve(l) }(ln)
+		go func() { errCh <- httpSrv.Serve(ln) }()
 	}
 	serveErr := <-errCh // first listener to stop ends the daemon
 
@@ -138,12 +141,9 @@ func (a *App) Serve(ctx context.Context) error {
 // loopback works. We deliberately never bind 0.0.0.0 — the daemon has no auth
 // and must stay off the network.
 func (a *App) listenLoopback() ([]net.Listener, error) {
-	addrs := []string{
-		fmt.Sprintf("127.0.0.1:%d", a.Cfg.Port),
-		fmt.Sprintf("[::1]:%d", a.Cfg.Port),
-	}
+	port := strconv.Itoa(a.Cfg.Port)
 	var lns []net.Listener
-	for _, addr := range addrs {
+	for _, addr := range []string{a.Addr(), net.JoinHostPort("::1", port)} {
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
 			if len(lns) == 0 {
@@ -166,40 +166,30 @@ func (a *App) reapOrphanEngines() {
 	_ = exec.Command("pkill", "-9", "-f", a.enginePath).Run()
 }
 
-// ResolveEnginePath locates the bundled sd-server binary: $OFLUX_ENGINE, then
-// next to the executable (including the .app Resources dir), then $PATH.
+// resolveEngineFrom locates the bundled sd-server binary given the path
+// os.Executable() reported ("" searches $PATH only): $OFLUX_ENGINE, then next
+// to the executable (including the .app Resources dir), then $PATH. exe is
+// injected so the bundle/symlink layouts can be tested without reinstalling.
 //
-// The executable path is resolved through symlinks first. `oflux` on the user's
-// PATH is a symlink into oflux.app/Contents/MacOS/, and os.Executable() returns
-// that symlink — so searching relative to it looks beside the symlink (e.g.
-// /opt/homebrew/bin) and never finds Contents/Resources/sd-server. The symptom
-// is `oflux serve` warning that the engine is missing while the menu-bar app,
-// launched directly from the bundle, works fine.
-func ResolveEnginePath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		exe = ""
-	}
-	return resolveEngineFrom(exe)
-}
-
-// resolveEngineFrom is ResolveEnginePath with the executable path injected, so
-// the bundle/symlink layouts can be tested without reinstalling the app.
+// It is also resolved through symlinks: `oflux` on the user's PATH is a symlink
+// into oflux.app/Contents/MacOS/, and os.Executable() returns that symlink — so
+// searching relative to it looks beside the symlink (e.g. /opt/homebrew/bin) and
+// never finds Contents/Resources/sd-server. The symptom is `oflux serve` warning
+// that the engine is missing while the menu-bar app, launched from the bundle,
+// works fine.
 func resolveEngineFrom(exe string) (string, error) {
 	if p := os.Getenv("OFLUX_ENGINE"); p != "" {
-		if isExec(p) {
-			return p, nil
+		if !isExec(p) {
+			return "", fmt.Errorf("OFLUX_ENGINE=%s is not an executable", p)
 		}
-		return "", fmt.Errorf("OFLUX_ENGINE=%s is not an executable", p)
+		return p, nil
 	}
 	if exe != "" {
-		dirs := []string{filepath.Dir(exe)}
 		// Search beside the real binary too, but keep the symlink's own
 		// directory first so a side-by-side dev build still wins.
-		if resolved, rerr := filepath.EvalSymlinks(exe); rerr == nil {
-			if d := filepath.Dir(resolved); d != dirs[0] {
-				dirs = append(dirs, d)
-			}
+		dirs := []string{filepath.Dir(exe)}
+		if d := filepath.Dir(realPath(exe)); d != dirs[0] {
+			dirs = append(dirs, d)
 		}
 		for _, dir := range dirs {
 			for _, cand := range []string{
@@ -216,6 +206,14 @@ func resolveEngineFrom(exe string) (string, error) {
 		return p, nil
 	}
 	return "", errors.New("sd-server engine binary not found (set OFLUX_ENGINE)")
+}
+
+// realPath resolves symlinks in p, falling back to p when it cannot.
+func realPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
 }
 
 func isExec(p string) bool {

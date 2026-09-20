@@ -66,14 +66,23 @@ type EngineSpec struct {
 	Defaults  map[string]any `json:"defaults,omitempty"`   // sampling defaults: cfg_scale, flow_shift, steps, sample_method...
 }
 
-// Manifest is the resolved, on-disk description of an installed model. It is
-// written to ~/.oflux/manifests/<name>.json once a pull completes.
+// Manifest is the resolved, on-disk description of an installed model, written
+// to ~/.oflux/manifests/<name>.json once a pull completes. Mode is frozen at
+// pull time and goes stale — anything deciding edit-vs-generate should ask
+// archdb.ModeOf(m.Architecture, m.Mode) rather than read it.
 type Manifest struct {
 	Name         string      `json:"name"`
 	Architecture string      `json:"architecture"` // "flux", "qwen-image-edit", "z-image", ...
 	Mode         Mode        `json:"mode"`
 	Components   []Component `json:"components"`
 	Engine       EngineSpec  `json:"engine"`
+
+	// Base is the checkpoint the friendly name hides: "qwen-image-edit" is
+	// Qwen-Image-Edit-2511, and nothing in the name says so. Revision is its
+	// release tag, when the publisher encodes one (2509 and 2511 are different
+	// models sharing an architecture).
+	Base     string `json:"base,omitempty"`     // e.g. "Qwen-Image-Edit-2511"
+	Revision string `json:"revision,omitempty"` // e.g. "2511"
 }
 
 // Component returns the component with the given role, if present.
@@ -136,20 +145,28 @@ type Verdict struct {
 
 // Config is the daemon configuration persisted at ~/.oflux/config.json.
 type Config struct {
-	Port         int    `json:"port"`          // default 11534
-	IdleTTL      string `json:"idle_ttl"`      // Go duration string, default "2m"
-	MaxLoaded    int    `json:"max_loaded"`    // default 1
-	DefaultQuant string `json:"default_quant"` // default "Q8_0"
-	HFToken      string `json:"hf_token,omitempty"`
-	ModelsDir    string `json:"models_dir,omitempty"` // override for ~/.oflux
+	Port      int    `json:"port"`       // default 11534
+	IdleTTL   string `json:"idle_ttl"`   // Go duration string, default "2m"
+	MaxLoaded int    `json:"max_loaded"` // default 1
+	// MaxConcurrent is generations at once per loaded model. sd-server takes no
+	// parallelism flag, so 1 is the honest default; the knob exists for the day
+	// that changes. QueueDepth is how many requests may wait before the daemon
+	// answers 429 instead of blocking; <=0 is unbounded.
+	MaxConcurrent int    `json:"max_concurrent"` // default 1
+	QueueDepth    int    `json:"queue_depth"`    // default 8
+	DefaultQuant  string `json:"default_quant"`  // default "Q8_0"
+	HFToken       string `json:"hf_token,omitempty"`
+	ModelsDir     string `json:"models_dir,omitempty"` // override for ~/.oflux
 }
 
 // DefaultConfig returns the built-in defaults.
 func DefaultConfig() Config {
 	return Config{
-		Port:         11534,
-		IdleTTL:      "2m",
-		MaxLoaded:    1,
-		DefaultQuant: "Q8_0",
+		Port:          11534,
+		IdleTTL:       "2m",
+		MaxLoaded:     1,
+		MaxConcurrent: 1,
+		QueueDepth:    8,
+		DefaultQuant:  "Q8_0",
 	}
 }

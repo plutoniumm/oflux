@@ -1,11 +1,7 @@
-// Package puller orchestrates installing a model: it resolves a friendly name
-// or Hugging Face repo into a manifest (via the curated registry or the generic
-// compatibility inspector), downloads every component into the content-addressed
-// blob store (deduplicating shared encoders/VAEs across models), and writes the
-// resolved manifest.
-//
-// It is the glue between internal/registry + internal/compat (what to install),
-// internal/hfclient (fetch it), and internal/store (where it lives).
+// Package puller installs a model: it resolves a name or Hugging Face repo into
+// a manifest, downloads every component into the content-addressed blob store
+// (deduplicating shared encoders/VAEs), and writes the manifest. It is the glue
+// between registry + compat (what to install), hfclient (fetch it) and store.
 package puller
 
 import (
@@ -18,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"oflux/internal/archdb"
 	"oflux/internal/compat"
 	"oflux/internal/hfclient"
 	"oflux/internal/registry"
@@ -25,11 +22,6 @@ import (
 	"oflux/internal/types"
 )
 
-// defaultQuantChain is the fallback preference appended after the user's
-// requested quant when inspecting arbitrary repos.
-var defaultQuantChain = []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_0"}
-
-// Puller installs models into a Store using a Hugging Face client.
 type Puller struct {
 	hf    *hfclient.Client
 	store *store.Store
@@ -38,14 +30,12 @@ type Puller struct {
 	inFlight map[string]bool // models currently being pulled
 }
 
-// New returns a Puller.
 func New(hf *hfclient.Client, st *store.Store) *Puller {
 	return &Puller{hf: hf, store: st, inFlight: make(map[string]bool)}
 }
 
-// claim marks name as being pulled, refusing a second concurrent pull of the
-// same model (which would otherwise have two writers racing over the same
-// components).
+// claim refuses a second concurrent pull of the same model: two writers would
+// race over the same components.
 func (p *Puller) claim(name string) (release func(), err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -60,7 +50,6 @@ func (p *Puller) claim(name string) (release func(), err error) {
 	}, nil
 }
 
-// Progress is an optional callback for human-readable progress lines.
 type Progress func(msg string)
 
 func (p Progress) emit(msg string) {
@@ -69,19 +58,10 @@ func (p Progress) emit(msg string) {
 	}
 }
 
-// IsCurated reports whether name is a curated registry model.
-func IsCurated(name string) bool {
-	_, ok := registry.Lookup(name)
-	return ok
-}
-
-// Resolve decides what would be installed for nameOrRepo at the given quant,
-// WITHOUT downloading anything. Curated names go through the registry; anything
-// containing a "/" is treated as a Hugging Face repo and inspected for
-// compatibility; otherwise it is an error.
-//
-// file pins the exact diffusion weights within a repo, for repos that publish
-// many builds; it is not meaningful for curated models, which pin their own.
+// Resolve decides what would be installed, WITHOUT downloading anything: a
+// curated name through the registry, anything containing a "/" as a repo to
+// inspect. file pins the diffusion weights in a repo that publishes many
+// builds, and is meaningless for a curated model, which pins its own.
 func (p *Puller) Resolve(ctx context.Context, nameOrRepo, quant, file string) (types.Verdict, error) {
 	if m, ok := registry.Resolve(nameOrRepo, quant); ok {
 		if file != "" {
@@ -108,9 +88,8 @@ type Opts struct {
 	As string
 }
 
-// Pull resolves nameOrRepo, downloads every component (skipping blobs already
-// present), writes the manifest, and returns it. An incompatible repo yields a
-// descriptive error listing the blockers.
+// Pull downloads every component (skipping blobs already present) and writes
+// the manifest. An incompatible repo yields an error listing the blockers.
 func (p *Puller) Pull(ctx context.Context, nameOrRepo, quant string, opts Opts, prog Progress) (types.Manifest, error) {
 	v, err := p.Resolve(ctx, nameOrRepo, quant, opts.File)
 	if err != nil {
@@ -145,42 +124,31 @@ func (p *Puller) Pull(ctx context.Context, nameOrRepo, quant string, opts Opts, 
 		prog.emit(note)
 	}
 
-	tmpDir := filepath.Join(p.store.Root(), "tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return types.Manifest{}, err
-	}
-
 	trees := map[string][]types.HFFile{} // source repo -> file list, cached per pull
 	for i := range m.Components {
 		c := &m.Components[i]
 		if c.Source == "" || c.File == "" {
 			return types.Manifest{}, fmt.Errorf("component %s has no source/file", c.Role)
 		}
+		label := fmt.Sprintf("%s %s", c.Role, c.File)
 
-		// Resolve the file's content hash + size up front so we can skip
-		// downloading a blob we already have (shared encoders/VAEs). Only an
-		// LFS entry carries a sha256; a plain git blob's oid is a sha1 and is
-		// useless both as a blob address and as a download checksum.
-		sha, size, verified := p.lookupFile(ctx, trees, c.Source, c.File)
-		if verified {
-			blob := store.BlobName(sha)
-			if p.store.HasBlob(blob) {
-				c.Blob, c.SHA256, c.Size = blob, sha, size
-				prog.emit(fmt.Sprintf("✓ %s (cached) %s", c.Role, c.File))
-				continue
-			}
-		} else {
-			sha = "" // never pass a non-sha256 as the expected checksum
-			prog.emit(fmt.Sprintf("! %s %s: no sha256 published; integrity check skipped", c.Role, c.File))
+		// Resolve the content hash up front so a blob we already have (a shared
+		// encoder or VAE) is never downloaded twice. compat walked the repo tree
+		// to resolve the component and carries what it saw; only one that came
+		// without it costs a tree fetch here.
+		sha, size := p.componentSHA(ctx, trees, *c)
+		if sha == "" {
+			prog.emit(fmt.Sprintf("! %s: no sha256 published; integrity check skipped", label))
+		} else if blob := store.BlobName(sha); p.store.HasBlob(blob) {
+			c.Blob, c.SHA256, c.Size = blob, sha, size
+			prog.emit(fmt.Sprintf("✓ %s (cached) %s", c.Role, c.File))
+			continue
 		}
 
-		prog.emit(fmt.Sprintf("↓ %s %s from %s", c.Role, c.File, c.Source))
-		// A unique temp name per attempt: two concurrent pulls that share a
-		// component (a VAE, an encoder) must not write into the same file.
-		tmp := filepath.Join(tmpDir, fmt.Sprintf("%d-%d-%s__%s", os.Getpid(), i, sanitize(c.Source), sanitize(c.File)))
-		got, err := p.hf.Download(ctx, c.Source, "main", c.File, tmp, sha)
+		tmpName := fmt.Sprintf("%d-%d-%s__%s", os.Getpid(), i, sanitize(c.Source), sanitize(c.File))
+		tmp, got, err := p.download(ctx, c.Source, c.File, sha, label, tmpName, prog)
 		if err != nil {
-			return types.Manifest{}, fmt.Errorf("download %s/%s: %w", c.Source, c.File, hintGated(err))
+			return types.Manifest{}, err
 		}
 		blob, err := p.store.PutBlob(got, tmp)
 		if err != nil {
@@ -201,60 +169,115 @@ func (p *Puller) Pull(ctx context.Context, nameOrRepo, quant string, opts Opts, 
 	return m, nil
 }
 
-// lookupFile finds a file in its source repo's tree (cached), returning its
-// content sha256, size, and whether that hash is a real sha256 (LFS entries
-// only). verified is false when the tree can't be fetched, the file isn't
-// found, or the entry is a plain git blob — the caller then downloads without a
-// pre-known checksum.
-func (p *Puller) lookupFile(ctx context.Context, cache map[string][]types.HFFile, source, file string) (sha string, size int64, verified bool) {
-	files, cached := cache[source]
-	if !cached {
-		f, err := p.hf.Tree(ctx, source, "")
-		if err != nil {
-			cache[source] = nil
-			return "", 0, false
-		}
-		files, cache[source] = f, f
+// download returns the temp path plus the content's sha256. A non-empty sha is
+// the checksum the transfer is verified against.
+func (p *Puller) download(ctx context.Context, source, file, sha, label, tmpName string, prog Progress) (tmp, sum string, err error) {
+	tmpDir := filepath.Join(p.store.Root(), "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", "", err
 	}
-	// Exact path wins over a basename match: a repo can hold several files with
-	// the same basename in different directories (e.g. an archived copy under
-	// old/), and matching the wrong one binds the component to wrong content.
-	match := func(pred func(types.HFFile) bool) (types.HFFile, bool) {
-		for _, f := range files {
-			if pred(f) {
-				return f, true
-			}
-		}
-		return types.HFFile{}, false
+	// tmpName is unique per attempt: two concurrent pulls that share a
+	// component (a VAE, an encoder) must not write into the same file.
+	tmp = filepath.Join(tmpDir, tmpName)
+	prog.emit(fmt.Sprintf("↓ %s from %s", label, source))
+	sum, err = p.hf.Download(ctx, source, "main", file, tmp, sha)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return "", "", fmt.Errorf("download %s/%s: %w", source, file, hintGated(err))
 	}
-	f, ok := match(func(f types.HFFile) bool { return f.Path == file })
-	if !ok {
-		f, ok = match(func(f types.HFFile) bool { return path.Base(f.Path) == file })
-	}
-	if !ok {
-		return "", 0, false
-	}
-	if !f.IsLFS || f.LFSOID == "" {
-		return "", f.Size, false // git sha1 is not a content sha256
-	}
-	return f.LFSOID, f.Size, true
+	return tmp, sum, nil
 }
 
-// quantPref builds the ordered quant preference: the requested quant first, then
-// the default fallback chain, de-duplicated.
-func quantPref(quant string) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(q string) {
-		if q == "" || seen[q] {
-			return
-		}
-		seen[q] = true
-		out = append(out, q)
+func (p *Puller) componentSHA(ctx context.Context, trees map[string][]types.HFFile, c types.Component) (sha string, size int64) {
+	if isSHA256(c.SHA256) {
+		return c.SHA256, c.Size
 	}
-	add(quant)
-	for _, q := range defaultQuantChain {
-		add(q)
+	sha, size = p.publishedSHA(ctx, trees, c.Source, c.File)
+	if size == 0 {
+		size = c.Size
+	}
+	return sha, size
+}
+
+// isSHA256 guards against a component carrying a git blob oid instead — a
+// sha1, which as an expected checksum fails every transfer it guards.
+func isSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// publishedSHA returns the checksum source/file can be verified against, plus
+// the published size (0 when there is none). Only an LFS entry carries a
+// sha256; a plain git blob's oid is a sha1 of the pointer, useless as both a
+// blob address and a checksum, so such a file is fetched unverified.
+func (p *Puller) publishedSHA(ctx context.Context, trees map[string][]types.HFFile, source, file string) (sha string, size int64) {
+	files, err := p.repoTree(ctx, trees, source)
+	if err != nil {
+		return "", 0
+	}
+	f, ok := matchPath(files, func(f types.HFFile) string { return f.Path }, file)
+	if !ok {
+		return "", 0
+	}
+	if f.IsLFS && f.LFSOID != "" {
+		return f.LFSOID, f.Size
+	}
+	return "", f.Size
+}
+
+// repoTree fetches each repo at most once per pull: components often share a
+// repo, and a LoRA pull inspects the tree it then downloads from.
+func (p *Puller) repoTree(ctx context.Context, cache map[string][]types.HFFile, source string) ([]types.HFFile, error) {
+	if files, ok := cache[source]; ok {
+		return files, nil
+	}
+	files, err := p.hf.Tree(ctx, source, "")
+	if err != nil {
+		cache[source] = nil // don't re-ask a repo that just failed
+		return nil, err
+	}
+	cache[source] = files
+	return files, nil
+}
+
+// matchPath prefers an exact path over a basename match: a repo can hold the
+// same basename in several directories (an archived copy under old/), and the
+// wrong one binds a component to the wrong content.
+func matchPath[T any](items []T, pathOf func(T) string, want string) (T, bool) {
+	for _, it := range items {
+		if pathOf(it) == want {
+			return it, true
+		}
+	}
+	for _, it := range items {
+		if path.Base(pathOf(it)) == want {
+			return it, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+// quantPref orders the quantizations to try: the requested one first, then
+// archdb's chain. The order lives in archdb, beside the arch table that decides
+// which companion quants exist, so there is one such list and not four.
+func quantPref(quant string) []string {
+	want, known := archdb.ParseQuant(quant)
+	var out []string
+	if quant != "" && !known {
+		// An unknown label is still worth trying first: the user named a build
+		// they can see in the repo, and SelectQuant matches it textually.
+		out = append(out, quant)
+	}
+	for _, q := range archdb.QuantChain(want) {
+		out = append(out, string(q))
 	}
 	return out
 }
@@ -274,7 +297,6 @@ func blockerError(repo string, v types.Verdict) error {
 	return errors.New(b.String())
 }
 
-// hintGated enriches an auth error with actionable guidance.
 func hintGated(err error) error {
 	if errors.Is(err, hfclient.ErrUnauthorized) {
 		return fmt.Errorf("%w — this repo is gated/private; accept its license on Hugging Face and set an HF token (config hf_token)", err)
@@ -282,7 +304,7 @@ func hintGated(err error) error {
 	return err
 }
 
-func sanitize(s string) string {
-	r := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
-	return r.Replace(s)
-}
+// tmpNameUnsafe must not reach a temp-file name.
+var tmpNameUnsafe = strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
+
+func sanitize(s string) string { return tmpNameUnsafe.Replace(s) }

@@ -32,6 +32,11 @@
 *.out
 coverage.*
 
+# ── agent tooling ───────────────────────────────────────────────────────────
+CLAUDE.md
+.claude/
+AGENTS.md
+
 # ── macOS / editors ─────────────────────────────────────────────────────────
 .DS_Store
 .idea/

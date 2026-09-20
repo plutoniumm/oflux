@@ -20,29 +20,40 @@ const Label = "io.github.plutoniumm.oflux"
 // the app and the two daemons fight over the port.
 var legacyLabels = []string{"ch.manav.oflux"}
 
-// removeLegacy unloads and deletes any superseded LaunchAgent.
-func removeLegacy() {
-	home, err := os.UserHomeDir()
+// The current user's launchd GUI domain, and one agent inside it.
+func guiDomain() string             { return "gui/" + strconv.Itoa(os.Getuid()) }
+func serviceTarget(l string) string { return guiDomain() + "/" + l }
+
+// launchctl reports what the command printed: its exit status is never diagnostic.
+func launchctl(args ...string) error {
+	out, err := exec.Command("launchctl", args...).CombinedOutput()
 	if err != nil {
-		return
+		return fmt.Errorf("launchctl %s: %v: %s", args[0], err, strings.TrimSpace(string(out)))
 	}
-	target := "gui/" + strconv.Itoa(os.Getuid())
-	for _, l := range legacyLabels {
-		if l == Label {
-			continue
-		}
-		_ = exec.Command("launchctl", "bootout", target+"/"+l).Run()
-		_ = os.Remove(filepath.Join(home, "Library", "LaunchAgents", l+".plist"))
-	}
+	return nil
 }
 
-// PlistPath is where the agent plist lives for the current user.
-func PlistPath() string {
+// plistPathFor is where label's agent plist lives for the current user.
+// PlistPath is the same for our own label.
+func plistPathFor(label string) string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home = os.Getenv("HOME")
 	}
-	return filepath.Join(home, "Library", "LaunchAgents", Label+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+}
+
+func PlistPath() string { return plistPathFor(Label) }
+
+// removeLegacy unloads and deletes any superseded LaunchAgent.
+func removeLegacy() {
+	for _, l := range legacyLabels {
+		if l == Label {
+			continue
+		}
+		_ = launchctl("bootout", serviceTarget(l))
+		_ = os.Remove(plistPathFor(l))
+	}
 }
 
 // xmlStr escapes a string for inclusion in a plist <string> element. Paths can
@@ -58,6 +69,7 @@ func xmlStr(s string) string {
 // `<exe> menubar`, relaunches at login and on crash, and captures output to the
 // store's log dir.
 func plist(exe, logDir string) string {
+	logs := xmlStr(logDir)
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -70,43 +82,44 @@ func plist(exe, logDir string) string {
   </array>
   <key>RunAtLoad</key>          <true/>
   <key>KeepAlive</key>          <true/>
-  <key>StandardOutPath</key>    <string>%s/launchd.out.log</string>
-  <key>StandardErrorPath</key>  <string>%s/launchd.err.log</string>
+  <key>StandardOutPath</key>    <string>%[3]s/launchd.out.log</string>
+  <key>StandardErrorPath</key>  <string>%[3]s/launchd.err.log</string>
 </dict>
 </plist>
-`, Label, xmlStr(exe), xmlStr(logDir), xmlStr(logDir))
+`, Label, xmlStr(exe), logs)
+}
+
+// writeAgent drops any superseded agent and writes our plist, returning its path.
+func writeAgent(exe, logDir string) (string, error) {
+	removeLegacy()
+	p := PlistPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(p, []byte(plist(exe, logDir)), 0o644); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 // Install writes the LaunchAgent plist for exe and bootstraps it so the menu-bar
 // app starts now and at every login. logDir receives launchd's stdout/stderr.
 func Install(exe, logDir string) error {
-	removeLegacy()
-	p := PlistPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(p, []byte(plist(exe, logDir)), 0o644); err != nil {
+	p, err := writeAgent(exe, logDir)
+	if err != nil {
 		return err
 	}
 	// Reload cleanly: bootout an existing instance (ignore error), then bootstrap.
-	target := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("launchctl", "bootout", target+"/"+Label).Run()
-	if out, err := exec.Command("launchctl", "bootstrap", target, p).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
-	}
-	return nil
+	_ = launchctl("bootout", serviceTarget(Label))
+	return launchctl("bootstrap", guiDomain(), p)
 }
 
 // WritePlist writes the LaunchAgent plist for exe WITHOUT bootstrapping it, so
 // it takes effect at the next login. The menu-bar app uses this for first-run
 // self-setup, where bootstrapping would double-launch the already-running app.
 func WritePlist(exe, logDir string) error {
-	removeLegacy()
-	p := PlistPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(p, []byte(plist(exe, logDir)), 0o644)
+	_, err := writeAgent(exe, logDir)
+	return err
 }
 
 // Installed reports whether the LaunchAgent plist exists.
@@ -118,8 +131,7 @@ func Installed() bool {
 // Uninstall stops the agent and removes its plist.
 func Uninstall() error {
 	removeLegacy()
-	target := "gui/" + strconv.Itoa(os.Getuid())
-	_ = exec.Command("launchctl", "bootout", target+"/"+Label).Run()
+	_ = launchctl("bootout", serviceTarget(Label))
 	if err := os.Remove(PlistPath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}

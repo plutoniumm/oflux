@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -13,60 +12,22 @@ import (
 	"oflux/internal/types"
 )
 
-// OpenAI-compatible image endpoints, so existing OpenAI image clients can point
-// at oflux. They translate onto the same generate() path as the native API.
+// OpenAI-compatible image endpoints. They only translate their input into an
+// ImageRequest; validation, generation and error mapping stay the native path's.
 //
 //   POST /v1/images/edits        multipart: image[], mask, prompt, model, size
 //   POST /v1/images/generations  JSON:      {model, prompt, size}
 //
-// Both respond with the OpenAI shape: {created, model, data:[{b64_json}]}.
+// Both answer in the OpenAI shape, {created, model, data:[{b64_json}]}, and fail
+// in OpenAI's — a client that speaks this dialect parses the error too.
 
 func (s *Server) handleOpenAIEdit(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
-		return
-	}
-	model := r.FormValue("model")
-	if model == "" {
-		writeErr(w, http.StatusBadRequest, "model is required")
-		return
-	}
-	req := ImageRequest{Model: model, Prompt: r.FormValue("prompt")}
-	req.Width, req.Height = parseSize(r.FormValue("size"))
-
-	var files []*multipart.FileHeader
-	if r.MultipartForm != nil {
-		files = append(files, r.MultipartForm.File["image"]...)
-		files = append(files, r.MultipartForm.File["image[]"]...)
-	}
-	if len(files) == 0 {
-		writeErr(w, http.StatusBadRequest, "at least one image file is required")
-		return
-	}
-	// First image is the one being edited; any extras are reference images.
-	b, err := fileToBase64(files[0])
+	req, err := openAIEditRequest(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "reading image: "+err.Error())
+		failOpenAI(w, err)
 		return
 	}
-	req.Image = b
-	for _, fh := range files[1:] {
-		if rb, err := fileToBase64(fh); err == nil {
-			req.RefImages = append(req.RefImages, rb)
-		}
-	}
-	if masks := r.MultipartForm.File["mask"]; len(masks) > 0 {
-		if mb, err := fileToBase64(masks[0]); err == nil {
-			req.MaskImage = mb
-		}
-	}
-
-	name, img, code, err := s.generate(r.Context(), model, req, types.ModeEdit)
-	if err != nil {
-		writeErr(w, code, err.Error())
-		return
-	}
-	writeOpenAIImages(w, name, img)
+	s.serveOpenAI(w, r, req, types.ModeEdit)
 }
 
 func (s *Server) handleOpenAIGenerate(w http.ResponseWriter, r *http.Request) {
@@ -75,39 +36,65 @@ func (s *Server) handleOpenAIGenerate(w http.ResponseWriter, r *http.Request) {
 		Prompt string `json:"prompt"`
 		Size   string `json:"size"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSON(r, &body); err != nil {
+		failOpenAI(w, err)
 		return
 	}
-	if body.Model == "" {
-		writeErr(w, http.StatusBadRequest, "model is required")
-		return
-	}
-	req := ImageRequest{Model: body.Model, Prompt: body.Prompt}
+	req := &ImageRequest{Model: body.Model, Prompt: body.Prompt}
 	req.Width, req.Height = parseSize(body.Size)
-
-	name, img, code, err := s.generate(r.Context(), body.Model, req, types.ModeGenerate)
-	if err != nil {
-		writeErr(w, code, err.Error())
-		return
-	}
-	writeOpenAIImages(w, name, img)
+	s.serveOpenAI(w, r, req, types.ModeGenerate)
 }
 
-func writeOpenAIImages(w http.ResponseWriter, model string, imgs ...[]byte) {
-	data := make([]map[string]string, 0, len(imgs))
-	for _, b := range imgs {
-		data = append(data, map[string]string{"b64_json": base64.StdEncoding.EncodeToString(b)})
+func (s *Server) serveOpenAI(w http.ResponseWriter, r *http.Request, req *ImageRequest, mode types.Mode) {
+	res, err := s.generate(r.Context(), req, mode)
+	if err != nil {
+		failOpenAI(w, err)
+		return
+	}
+	data := make([]map[string]string, 0, len(res.Images))
+	for _, img := range res.Images {
+		data = append(data, map[string]string{"b64_json": img})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created": time.Now().Unix(),
-		"model":   model,
+		"model":   res.Model,
 		"data":    data,
 	})
 }
 
-// parseSize turns "1024x768" into width/height pointers; returns nils for empty
-// or malformed input (so the model's default size applies).
+func openAIEditRequest(r *http.Request) (*ImageRequest, error) {
+	if err := r.ParseMultipartForm(multipartMemory); err != nil {
+		return nil, badRequest("invalid multipart form: %w", err)
+	}
+	req := &ImageRequest{Model: r.FormValue("model"), Prompt: r.FormValue("prompt")}
+	req.Width, req.Height = parseSize(r.FormValue("size"))
+
+	var files []*multipart.FileHeader
+	if r.MultipartForm != nil {
+		files = append(files, r.MultipartForm.File["image"]...)
+		files = append(files, r.MultipartForm.File["image[]"]...)
+	}
+	if len(files) == 0 {
+		return nil, badRequest("at least one image file is required")
+	}
+	for i, fh := range files {
+		b, err := fileToBase64(fh)
+		if err != nil {
+			return nil, badRequest("reading image %d: %w", i, err)
+		}
+		req.Image = append(req.Image, b)
+	}
+	if masks := r.MultipartForm.File["mask"]; len(masks) > 0 {
+		b, err := fileToBase64(masks[0])
+		if err != nil {
+			return nil, badRequest("reading mask: %w", err)
+		}
+		req.MaskImage = b
+	}
+	return req, nil
+}
+
+// Nils for empty or malformed input, so the model's default size applies.
 func parseSize(s string) (*int, *int) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" {
@@ -125,15 +112,22 @@ func parseSize(s string) (*int, *int) {
 	return &wv, &hv
 }
 
+// Streams rather than reading the file into a []byte first: an upload is
+// megabytes, and the raw copy would sit alongside the encoded one for nothing.
 func fileToBase64(fh *multipart.FileHeader) (string, error) {
 	f, err := fh.Open()
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(f)
-	if err != nil {
+	var b strings.Builder
+	b.Grow(base64.StdEncoding.EncodedLen(int(fh.Size)))
+	enc := base64.NewEncoder(base64.StdEncoding, &b)
+	if _, err := io.Copy(enc, f); err != nil {
 		return "", err
 	}
-	return base64.StdEncoding.EncodeToString(b), nil
+	if err := enc.Close(); err != nil {
+		return "", err
+	}
+	return b.String(), nil
 }

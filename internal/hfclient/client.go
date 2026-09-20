@@ -1,9 +1,6 @@
-// Package hfclient is a minimal, dependency-free Hugging Face Hub client used by
-// oflux to inspect and download model repositories.
-//
-// It speaks only to the public Hub HTTP API and the resolve (download) endpoint;
-// it never shells out to git or git-lfs. All methods honour the caller's
-// context. The zero value is not usable; construct a Client with New.
+// Package hfclient is a minimal, dependency-free Hugging Face Hub client. It
+// speaks only to the public Hub HTTP API and the resolve (download) endpoint,
+// never shelling out to git or git-lfs. Construct a Client with New.
 package hfclient
 
 import (
@@ -33,15 +30,12 @@ var (
 	ErrRateLimited = errors.New("hf: rate limited")
 )
 
-// defaultBaseURL is the public Hugging Face Hub origin.
 const defaultBaseURL = "https://huggingface.co"
 
-// apiTimeout bounds metadata/API calls (Tree, ReadFile). Downloads are not
-// bounded by a client-level timeout because model weights can be large; they are
-// governed solely by the caller's context.
+// apiTimeout bounds metadata calls only: a download of multi-gigabyte weights
+// is governed solely by the caller's context.
 const apiTimeout = 60 * time.Second
 
-// Client talks to the Hugging Face Hub over HTTP.
 type Client struct {
 	baseURL    string
 	token      string
@@ -65,12 +59,6 @@ func (c *Client) SetBaseURL(u string) {
 	c.baseURL = strings.TrimRight(u, "/")
 }
 
-// SetHTTPClient overrides the underlying *http.Client. Intended for tests.
-func (c *Client) SetHTTPClient(h *http.Client) {
-	c.httpClient = h
-}
-
-// treeEntry is one raw entry from the Hub tree listing.
 type treeEntry struct {
 	Type string `json:"type"` // "file" or "directory"
 	OID  string `json:"oid"`  // git blob sha1
@@ -83,9 +71,8 @@ type treeEntry struct {
 	} `json:"lfs"`
 }
 
-// Tree lists every file in repo at revision (recursively). An empty revision
-// defaults to "main". Directory entries are skipped. Pagination via the Link
-// response header is followed transparently.
+// Tree lists every file in repo at revision, recursively, following Link-header
+// pagination. An empty revision means "main".
 func (c *Client) Tree(ctx context.Context, repo, revision string) ([]types.HFFile, error) {
 	revision = normRevision(revision)
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
@@ -116,14 +103,9 @@ func (c *Client) Tree(ctx context.Context, repo, revision string) ([]types.HFFil
 	return out, nil
 }
 
-// treePage fetches and decodes one page of a tree listing, returning the decoded
-// entries and the absolute URL of the next page ("" when there is none).
+// treePage returns one page of entries plus the next page's URL ("" if last).
 func (c *Client) treePage(ctx context.Context, url string) ([]treeEntry, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	resp, err := c.do(req)
+	resp, err := c.get(ctx, url)
 	if err != nil {
 		return nil, "", err
 	}
@@ -136,19 +118,12 @@ func (c *Client) treePage(ctx context.Context, url string) ([]treeEntry, string,
 	return entries, parseNextLink(resp.Header.Get("Link")), nil
 }
 
-// ReadFile fetches the whole content of a single file at repo@revision/path. An
-// empty revision defaults to "main". When maxBytes > 0 the read is capped to
-// that many bytes; maxBytes <= 0 reads the full body.
+// ReadFile reads repo@revision/path, capped to maxBytes when that is positive.
 func (c *Client) ReadFile(ctx context.Context, repo, revision, path string, maxBytes int64) ([]byte, error) {
-	revision = normRevision(revision)
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolveURL(repo, revision, path), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.do(req)
+	resp, err := c.get(ctx, c.resolveURL(repo, revision, path))
 	if err != nil {
 		return nil, err
 	}
@@ -161,21 +136,11 @@ func (c *Client) ReadFile(ctx context.Context, repo, revision, path string, maxB
 	return io.ReadAll(r)
 }
 
-// Download streams repo@revision/path to destPath and returns the lowercase hex
-// sha256 of the content. An empty revision defaults to "main". Parent
-// directories are created as needed. The body is streamed to destPath+".part",
-// hashed on the fly, fsync'd, then atomically renamed into place. When
-// expectSHA256 is non-empty it is compared case-insensitively against the
-// computed digest; on mismatch the partial file is removed and an error
-// returned. Download is not subject to a client timeout; cancel via ctx.
-func (c *Client) Download(ctx context.Context, repo, revision, path, destPath, expectSHA256 string) (string, error) {
-	revision = normRevision(revision)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolveURL(repo, revision, path), nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.do(req)
+// Download streams repo@revision/path to destPath+".part", hashing on the fly,
+// and renames it into place only once a non-empty expectSHA256 matches. It has
+// no client timeout: cancel via ctx. Returns the lowercase hex sha256.
+func (c *Client) Download(ctx context.Context, repo, revision, path, destPath, expectSHA256 string) (sum string, err error) {
+	resp, err := c.get(ctx, c.resolveURL(repo, revision, path))
 	if err != nil {
 		return "", err
 	}
@@ -189,44 +154,47 @@ func (c *Client) Download(ctx context.Context, repo, revision, path, destPath, e
 	if err != nil {
 		return "", err
 	}
+	// Past this point every failure must take the partial file with it: bytes
+	// left at a name a caller trusts are worse than no download at all.
+	defer func() {
+		if err != nil {
+			os.Remove(partPath)
+		}
+	}()
 
 	h := sha256.New()
-	if _, err := io.Copy(f, io.TeeReader(resp.Body, h)); err != nil {
-		f.Close()
-		os.Remove(partPath)
-		return "", err
+	if _, err = io.Copy(f, io.TeeReader(resp.Body, h)); err == nil {
+		err = f.Sync()
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(partPath)
-		return "", err
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(partPath)
+	if err != nil {
 		return "", err
 	}
 
-	sum := hex.EncodeToString(h.Sum(nil))
+	sum = hex.EncodeToString(h.Sum(nil))
 	if expectSHA256 != "" && !strings.EqualFold(sum, expectSHA256) {
-		os.Remove(partPath)
-		return "", fmt.Errorf("hf: sha256 mismatch for %s: got %s want %s", path, sum, strings.ToLower(expectSHA256))
+		err = fmt.Errorf("hf: sha256 mismatch for %s: got %s want %s", path, sum, strings.ToLower(expectSHA256))
+		return "", err
 	}
-	if err := os.Rename(partPath, destPath); err != nil {
-		os.Remove(partPath)
+	if err = os.Rename(partPath, destPath); err != nil {
 		return "", err
 	}
 	return sum, nil
 }
 
-// resolveURL builds the download/resolve URL for a file.
 func (c *Client) resolveURL(repo, revision, path string) string {
-	return fmt.Sprintf("%s/%s/resolve/%s/%s", c.baseURL, repo, revision, path)
+	return fmt.Sprintf("%s/%s/resolve/%s/%s", c.baseURL, repo, normRevision(revision), path)
 }
 
-// do sends req with auth applied and maps non-2xx statuses to errors. On success
-// the caller owns resp.Body and must close it; on error the body is drained and
-// closed here.
-func (c *Client) do(req *http.Request) (*http.Response, error) {
+// get applies the token and maps non-2xx to errors. On success the caller owns
+// resp.Body; on error it is read for a snippet and closed here.
+func (c *Client) get(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -241,8 +209,6 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// statusError maps an HTTP status to a sentinel error, or a formatted error with
-// a short body snippet for unexpected statuses.
 func statusError(resp *http.Response) error {
 	switch resp.StatusCode {
 	case http.StatusNotFound:
@@ -260,7 +226,6 @@ func statusError(resp *http.Response) error {
 	return fmt.Errorf("hf: unexpected status %s: %s", resp.Status, msg)
 }
 
-// normRevision defaults an empty revision to "main".
 func normRevision(revision string) string {
 	if revision == "" {
 		return "main"
@@ -268,29 +233,17 @@ func normRevision(revision string) string {
 	return revision
 }
 
-// parseNextLink extracts the rel="next" URL from an RFC 5988 Link header,
-// returning "" when there is no next link.
+// parseNextLink reads the rel="next" URL out of an RFC 5988 Link header.
 func parseNextLink(header string) string {
-	if header == "" {
-		return ""
-	}
 	for _, part := range strings.Split(header, ",") {
-		part = strings.TrimSpace(part)
-		lt := strings.IndexByte(part, '<')
-		gt := strings.IndexByte(part, '>')
-		if lt != 0 || gt < 0 {
+		target, params, ok := strings.Cut(strings.TrimSpace(part), ">")
+		if !ok || !strings.HasPrefix(target, "<") {
 			continue
 		}
-		target := part[lt+1 : gt]
-		params := part[gt+1:]
 		for _, p := range strings.Split(params, ";") {
-			p = strings.TrimSpace(p)
-			if !strings.HasPrefix(p, "rel=") {
-				continue
-			}
-			rel := strings.Trim(strings.TrimPrefix(p, "rel="), `"`)
-			if rel == "next" {
-				return target
+			rel, ok := strings.CutPrefix(strings.TrimSpace(p), "rel=")
+			if ok && strings.Trim(rel, `"`) == "next" {
+				return strings.TrimPrefix(target, "<")
 			}
 		}
 	}

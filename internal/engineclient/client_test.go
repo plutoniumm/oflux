@@ -19,7 +19,6 @@ import (
 	"time"
 )
 
-// tinyPNG returns a valid 1x1 PNG and its standard base64 encoding.
 func tinyPNG(t *testing.T) ([]byte, string) {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
@@ -87,9 +86,6 @@ func TestSubmit(t *testing.T) {
 	}
 	if job.ID != "job_1" || job.Status != "queued" {
 		t.Fatalf("job = %+v", job)
-	}
-	if job.PollURL != "/sdcpp/v1/jobs/job_1" {
-		t.Fatalf("poll_url = %q", job.PollURL)
 	}
 }
 
@@ -198,47 +194,148 @@ func TestCancel(t *testing.T) {
 	}
 }
 
-func TestImagesPNGNativeShape(t *testing.T) {
-	raw, b64 := tinyPNG(t)
+func TestImagesB64NativeShape(t *testing.T) {
+	_, b64 := tinyPNG(t)
 	job := Job{Result: json.RawMessage(fmt.Sprintf(`{"output_format":"png","images":[{"index":0,"b64_json":%q}]}`, b64))}
-	imgs, err := job.ImagesPNG()
+	imgs, err := job.ImagesB64()
 	if err != nil {
-		t.Fatalf("ImagesPNG: %v", err)
+		t.Fatalf("ImagesB64: %v", err)
 	}
-	if len(imgs) != 1 || !bytes.Equal(imgs[0], raw) {
-		t.Fatalf("decoded image mismatch (len=%d)", len(imgs))
+	if len(imgs) != 1 || imgs[0] != b64 {
+		t.Fatalf("base64 mismatch (len=%d)", len(imgs))
 	}
 }
 
-func TestImagesPNGImagesDataShape(t *testing.T) {
-	raw, b64 := tinyPNG(t)
+func TestImagesB64ImagesDataShape(t *testing.T) {
+	_, b64 := tinyPNG(t)
 	job := Job{Result: json.RawMessage(fmt.Sprintf(`{"images":[{"data":%q}]}`, b64))}
-	imgs, err := job.ImagesPNG()
+	imgs, err := job.ImagesB64()
 	if err != nil {
-		t.Fatalf("ImagesPNG: %v", err)
+		t.Fatalf("ImagesB64: %v", err)
 	}
-	if len(imgs) != 1 || !bytes.Equal(imgs[0], raw) {
-		t.Fatal("decoded image mismatch for images[].data shape")
+	if len(imgs) != 1 || imgs[0] != b64 {
+		t.Fatal("base64 mismatch for images[].data shape")
 	}
 }
 
-func TestImagesPNGOpenAIShape(t *testing.T) {
-	raw, b64 := tinyPNG(t)
+func TestImagesB64OpenAIShape(t *testing.T) {
+	_, b64 := tinyPNG(t)
 	job := Job{Result: json.RawMessage(fmt.Sprintf(`{"data":[{"b64_json":%q}]}`, b64))}
-	imgs, err := job.ImagesPNG()
+	imgs, err := job.ImagesB64()
 	if err != nil {
-		t.Fatalf("ImagesPNG: %v", err)
+		t.Fatalf("ImagesB64: %v", err)
 	}
-	if len(imgs) != 1 || !bytes.Equal(imgs[0], raw) {
-		t.Fatal("decoded image mismatch for data[].b64_json shape")
+	if len(imgs) != 1 || imgs[0] != b64 {
+		t.Fatal("base64 mismatch for data[].b64_json shape")
 	}
 }
 
-func TestImagesPNGNoResult(t *testing.T) {
-	if _, err := (Job{}).ImagesPNG(); err == nil {
+// Unpadded base64 from the engine must not reach a client that cannot read it.
+func TestImagesB64RestoresPadding(t *testing.T) {
+	raw, b64 := tinyPNG(t)
+	unpadded := strings.TrimRight(b64, "=")
+	if unpadded == b64 {
+		t.Skip("fixture happens to need no padding")
+	}
+	job := Job{Result: json.RawMessage(fmt.Sprintf(`{"images":[{"b64_json":%q}]}`, unpadded))}
+	imgs, err := job.ImagesB64()
+	if err != nil {
+		t.Fatalf("ImagesB64: %v", err)
+	}
+	if imgs[0] != b64 {
+		t.Fatalf("padding not restored: %q", imgs[0])
+	}
+	got, err := base64.StdEncoding.DecodeString(imgs[0])
+	if err != nil {
+		t.Fatalf("result is not standard base64: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatal("padded result decodes to the wrong bytes")
+	}
+}
+
+func TestImagesB64NoResult(t *testing.T) {
+	if _, err := (Job{}).ImagesB64(); err == nil {
 		t.Fatal("expected error for empty result")
 	}
-	if _, err := (Job{Result: json.RawMessage("null")}).ImagesPNG(); err == nil {
+	if _, err := (Job{Result: json.RawMessage("null")}).ImagesB64(); err == nil {
 		t.Fatal("expected error for null result")
+	}
+	if _, err := (Job{Result: json.RawMessage(`{"images":[]}`)}).ImagesB64(); err == nil {
+		t.Fatal("expected error for an empty image list")
+	}
+}
+
+func TestJobError(t *testing.T) {
+	err := error(&JobError{Op: "img_gen", Status: "failed", Reason: "ggml_metal_encode: error"})
+	if got := err.Error(); !strings.Contains(got, "img_gen") || !strings.Contains(got, "ggml_metal_encode") {
+		t.Fatalf("Error() = %q", got)
+	}
+	// No reason: the message must still say what happened, not trail a colon.
+	if got := (&JobError{Status: "cancelled"}).Error(); got != "engine: job cancelled" {
+		t.Fatalf("bare Error() = %q", got)
+	}
+	var je *JobError
+	if !errors.As(fmt.Errorf("wrapped: %w", err), &je) || je.Reason == "" {
+		t.Fatal("JobError must survive wrapping for errors.As")
+	}
+}
+
+// One flaky poll must not lose a generation.
+func TestWaitToleratesTransientPollFailure(t *testing.T) {
+	_, b64 := tinyPNG(t)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			w.WriteHeader(http.StatusInternalServerError)
+		case 2:
+			_, _ = w.Write([]byte(`{"id":"job_1","status":"generating","error":null}`))
+		default:
+			fmt.Fprintf(w, `{"id":"job_1","status":"completed","result":{"images":[{"b64_json":%q}]},"error":null}`, b64)
+		}
+	}))
+	defer srv.Close()
+
+	job, err := newTestClient(t, srv).Wait(context.Background(), "job_1", time.Millisecond)
+	if err != nil {
+		t.Fatalf("Wait should have ridden out one 500: %v", err)
+	}
+	if job.Status != "completed" {
+		t.Fatalf("status = %q", job.Status)
+	}
+}
+
+func TestWaitGivesUpAfterRepeatedPollFailures(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	if _, err := newTestClient(t, srv).Wait(context.Background(), "job_1", time.Millisecond); err == nil {
+		t.Fatal("expected Wait to give up on a permanently broken engine")
+	}
+	if got := atomic.LoadInt32(&calls); got != maxPollFailures {
+		t.Fatalf("polled %d times, want exactly %d", got, maxPollFailures)
+	}
+}
+
+// Without these a wedged engine hangs a call until the OS gives up on the socket.
+func TestClientIsBounded(t *testing.T) {
+	c := New("http://127.0.0.1:1")
+	if c.http.Timeout <= 0 {
+		t.Fatal("engine client has no request timeout")
+	}
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", c.http.Transport)
+	}
+	if tr.ResponseHeaderTimeout <= 0 {
+		t.Fatal("transport has no response-header timeout")
+	}
+	if tr.MaxIdleConnsPerHost < 1 {
+		t.Fatal("poll loop needs connection reuse")
 	}
 }

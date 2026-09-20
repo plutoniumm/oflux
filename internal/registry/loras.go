@@ -1,6 +1,9 @@
 package registry
 
-import "slices"
+import (
+	"slices"
+	"strings"
+)
 
 // Lora is a curated LoRA adapter: a friendly name pinned to an exact Hugging
 // Face repo and file, plus the architectures it is trained against.
@@ -73,24 +76,10 @@ var curatedLoras = []Lora{
 }
 
 // LoraNames returns the curated LoRA names, sorted.
-func LoraNames() []string {
-	out := make([]string, 0, len(curatedLoras))
-	for _, l := range curatedLoras {
-		out = append(out, l.Name)
-	}
-	slices.Sort(out)
-	return out
-}
+func LoraNames() []string { return sortedNames(curatedLoras, loraName) }
 
 // LookupLora returns the curated LoRA with the given name.
-func LookupLora(name string) (Lora, bool) {
-	for _, l := range curatedLoras {
-		if l.Name == name {
-			return l, true
-		}
-	}
-	return Lora{}, false
-}
+func LookupLora(name string) (Lora, bool) { return byName(curatedLoras, loraName, name) }
 
 // LorasForArch returns the curated LoRAs trained for an architecture, sorted by
 // name. Used to tell a user which adapters are worth installing for a model
@@ -102,21 +91,9 @@ func LorasForArch(arch string) []Lora {
 			out = append(out, l)
 		}
 	}
-	slices.SortFunc(out, func(a, b Lora) int {
-		switch {
-		case a.Name < b.Name:
-			return -1
-		case a.Name > b.Name:
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(out, func(a, b Lora) int { return strings.Compare(a.Name, b.Name) })
 	return out
 }
 
 // AllLoras returns a copy of the curated LoRA table.
-func AllLoras() []Lora {
-	out := make([]Lora, len(curatedLoras))
-	copy(out, curatedLoras)
-	return out
-}
+func AllLoras() []Lora { return slices.Clone(curatedLoras) }

@@ -1,18 +1,13 @@
 // Package registry is the curated model registry: hand-verified templates for
 // the blessed diffusion models so that `oflux pull <friendly-name>` just works.
 //
-// Each curated Model names the archdb architecture it uses and pins the exact
-// Hugging Face repo id and filename pattern for its model-specific diffusion
-// weights. Shared components (VAE, text encoders, vision projector) are taken
-// from the architecture's Companions unless a Model overrides them here — used
-// when a companion filename in archdb does not literally exist in its source
-// (e.g. the Qwen-Image VAE lives under split_files/vae/ in its repo).
+// Each Model names its archdb architecture and pins the exact Hugging Face repo
+// id and filename pattern for its diffusion weights; shared components come
+// from the architecture's Companions unless overridden here. Every repo id,
+// filename and quant list was verified against the live Hugging Face tree.
 //
-// All repo ids, diffusion filenames and quant lists in this file were verified
-// against the live Hugging Face repo trees; see the package's test coverage and
-// the accompanying notes. This package performs no I/O: it turns a curated name
-// plus a quant label into a manifest template (Component.Blob left empty; the
-// puller fills content addresses in once files are downloaded).
+// This package performs no I/O: it turns a curated name plus a quant label into
+// a manifest template, with Component.Blob left for the puller to fill.
 package registry
 
 import (
@@ -30,152 +25,141 @@ import (
 type Model struct {
 	Name           string                          // friendly name, e.g. "qwen-image-edit"
 	Arch           string                          // archdb arch name
-	Mode           types.Mode                      // convenience copy of arch.Mode
 	DiffSource     string                          // HF repo id hosting the diffusion GGUF
 	DiffPattern    string                          // filename with "{quant}" token
-	Quants         []string                        // quant labels available in DiffSource (curated, aligned with companions)
+	Quants         []archdb.Quant                  // quant labels DiffSource publishes, best first
 	ExtraModelArgs map[string]any                  // merged over arch.ModelArgs
 	Overrides      map[types.Role]archdb.Companion // optional per-role source overrides for shared components
 	Description    string
 }
 
 // curated is the hand-verified model table. Order is irrelevant; Names() sorts.
-var curated = buildCurated()
-
-func buildCurated() []Model {
-	// qwenVAE is the correct on-disk path for the Qwen-Image VAE. The archdb
-	// default is "qwen_image_vae.safetensors", but in Comfy-Org/Qwen-Image_ComfyUI
-	// the file actually lives at split_files/vae/qwen_image_vae.safetensors.
-	qwenVAE := archdb.Companion{
-		Source:      "Comfy-Org/Qwen-Image_ComfyUI",
-		FilePattern: "split_files/vae/qwen_image_vae.safetensors",
-		Quantized:   false,
-	}
-	// qwenMMProj pins the Qwen2.5-VL vision projector to its fixed f16 file. Only
-	// mmproj-Q8_0 and mmproj-f16 exist in the source, so the archdb per-quant
-	// pattern ("...mmproj-{quant}.gguf") only resolves for Q8_0; f16 always works.
-	qwenMMProj := archdb.Companion{
-		Source:      "mradermacher/Qwen2.5-VL-7B-Instruct-GGUF",
-		FilePattern: "Qwen2.5-VL-7B-Instruct.mmproj-f16.gguf",
-		Quantized:   false,
-	}
-	return []Model{
-		// ---- EDIT models ------------------------------------------------------
-		{
-			Name:        "qwen-image-edit",
-			Arch:        "qwen-image-edit",
-			Mode:        types.ModeBoth,
-			DiffSource:  "unsloth/Qwen-Image-Edit-2511-GGUF",
-			DiffPattern: "qwen-image-edit-2511-{quant}.gguf",
-			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"},
-			// 2511 uses zero conditioning-timestep sampling.
-			ExtraModelArgs: map[string]any{"qwen_image_zero_cond_t": true},
-			Overrides: map[types.Role]archdb.Companion{
-				types.RoleVAE:    qwenVAE,
-				types.RoleMMProj: qwenMMProj,
-			},
-			Description: "Qwen-Image-Edit 2511 - instruction image editing (Qwen2.5-VL encoder).",
-		},
-		{
-			Name:        "flux.1-kontext",
-			Arch:        "flux-kontext",
-			Mode:        types.ModeEdit,
-			DiffSource:  "QuantStack/FLUX.1-Kontext-dev-GGUF",
-			DiffPattern: "flux1-kontext-dev-{quant}.gguf",
-			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M"},
-			Description: "FLUX.1 Kontext [dev] - in-context image editing.",
-		},
-
-		// ---- GENERATION models -----------------------------------------------
-		{
-			Name:       "flux.2-klein",
-			Arch:       "flux2-klein",
-			Mode:       types.ModeBoth,
-			DiffSource: "leejet/FLUX.2-klein-4B-GGUF", // sd.cpp author's own conversion
-			// The 4B klein; the repo ships Q8_0 (4.30 GB) and Q4_0 (2.46 GB) only.
-			DiffPattern: "flux-2-klein-4b-{quant}.gguf",
-			// Intersected with the Qwen3-4B encoder repo's labels so every listed
-			// quant resolves a real file for both components.
-			Quants:      []string{"Q8_0", "Q4_0"},
-			Description: "FLUX.2 klein 4B - few-step text-to-image (Qwen3-4B encoder).",
-		},
-		{
-			Name:        "z-image-turbo",
-			Arch:        "z-image",
-			Mode:        types.ModeGenerate,
-			DiffSource:  "leejet/Z-Image-Turbo-GGUF",
-			DiffPattern: "z_image_turbo-{quant}.gguf",
-			// Aligned with the Qwen3-4B encoder companion's quant labels.
-			Quants:      []string{"Q8_0", "Q6_K", "Q4_0", "Q2_K"},
-			Description: "Z-Image Turbo - fast few-step text-to-image (Qwen3-4B encoder).",
-		},
-		{
-			Name:        "flux.1-krea",
-			Arch:        "flux",
-			Mode:        types.ModeGenerate,
-			DiffSource:  "QuantStack/FLUX.1-Krea-dev-GGUF",
-			DiffPattern: "flux1-krea-dev-{quant}.gguf",
-			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M"},
-			Description: "FLUX.1 Krea [dev] - photographic text-to-image.",
-		},
-		{
-			Name:        "flux.1-dev",
-			Arch:        "flux",
-			Mode:        types.ModeGenerate,
-			DiffSource:  "city96/FLUX.1-dev-gguf",
-			DiffPattern: "flux1-dev-{quant}.gguf",
-			// city96 flux repos ship the *_S K-quants (no *_M); aligned with t5 encoder.
-			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_S", "Q4_K_S", "Q3_K_S"},
-			Description: "FLUX.1 [dev] - guidance-distilled text-to-image.",
-		},
-		{
-			Name:        "flux.1-schnell",
-			Arch:        "flux",
-			Mode:        types.ModeGenerate,
-			DiffSource:  "city96/FLUX.1-schnell-gguf",
-			DiffPattern: "flux1-schnell-{quant}.gguf",
-			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_S", "Q4_K_S", "Q3_K_S"},
-			Description: "FLUX.1 [schnell] - fast few-step text-to-image (Apache-2.0).",
-		},
-		{
-			Name:        "qwen-image",
-			Arch:        "qwen-image",
-			Mode:        types.ModeGenerate,
-			DiffSource:  "QuantStack/Qwen-Image-GGUF",
-			DiffPattern: "Qwen_Image-{quant}.gguf",
-			Quants:      []string{"Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q3_K_M", "Q2_K"},
-			Overrides: map[types.Role]archdb.Companion{
-				types.RoleVAE: qwenVAE,
-			},
-			Description: "Qwen-Image - text-to-image (Qwen2.5-VL encoder).",
-		},
-	}
+// The quant lists describe the DIFFUSION repo alone: companions resolve through
+// archdb.PickQuant against their own labels, so nothing is hand-intersected.
+var curated = []Model{
+	{
+		Name:        "qwen-image-edit",
+		Arch:        "qwen-image-edit",
+		DiffSource:  "unsloth/Qwen-Image-Edit-2511-GGUF",
+		DiffPattern: "qwen-image-edit-2511-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		// 2511 uses zero conditioning-timestep sampling.
+		ExtraModelArgs: map[string]any{"qwen_image_zero_cond_t": true},
+		Description:    "Qwen-Image-Edit 2511 - instruction image editing (Qwen2.5-VL encoder).",
+	},
+	{
+		Name:        "flux.1-kontext",
+		Arch:        "flux-kontext",
+		DiffSource:  "QuantStack/FLUX.1-Kontext-dev-GGUF",
+		DiffPattern: "flux1-kontext-dev-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		Description: "FLUX.1 Kontext [dev] - in-context image editing.",
+	},
+	{
+		Name:        "flux.2-klein",
+		Arch:        "flux2-klein",
+		DiffSource:  "leejet/FLUX.2-klein-4B-GGUF", // sd.cpp author's own conversion
+		DiffPattern: "flux-2-klein-4b-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q4_0"},
+		Description: "FLUX.2 klein 4B - few-step text-to-image and editing (Qwen3-4B encoder).",
+	},
+	{
+		// The 9B klein takes the Qwen3-8B encoder; archdb's klein variant picks
+		// it up from the "klein-9b" in the repo id and filename.
+		Name:        "flux.2-klein-9b",
+		Arch:        "flux2-klein",
+		DiffSource:  "leejet/FLUX.2-klein-9B-GGUF",
+		DiffPattern: "flux-2-klein-9b-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q4_0"},
+		Description: "FLUX.2 klein 9B - few-step text-to-image and editing (Qwen3-8B encoder).",
+	},
+	{
+		Name:        "z-image-turbo",
+		Arch:        "z-image",
+		DiffSource:  "leejet/Z-Image-Turbo-GGUF",
+		DiffPattern: "z_image_turbo-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_0", "Q4_K", "Q4_0", "Q3_K", "Q2_K"},
+		Description: "Z-Image Turbo - fast few-step text-to-image (Qwen3-4B encoder).",
+	},
+	{
+		Name:        "flux.1-krea",
+		Arch:        "flux",
+		DiffSource:  "QuantStack/FLUX.1-Krea-dev-GGUF",
+		DiffPattern: "flux1-krea-dev-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		Description: "FLUX.1 Krea [dev] - photographic text-to-image.",
+	},
+	{
+		Name:        "flux.1-dev",
+		Arch:        "flux",
+		DiffSource:  "city96/FLUX.1-dev-gguf",
+		DiffPattern: "flux1-dev-{quant}.gguf",
+		// city96 flux repos ship the *_S K-quants, no *_M.
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
+		Description: "FLUX.1 [dev] - guidance-distilled text-to-image.",
+	},
+	{
+		Name:        "flux.1-schnell",
+		Arch:        "flux",
+		DiffSource:  "city96/FLUX.1-schnell-gguf",
+		DiffPattern: "flux1-schnell-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
+		Description: "FLUX.1 [schnell] - fast few-step text-to-image (Apache-2.0).",
+	},
+	{
+		Name:        "qwen-image",
+		Arch:        "qwen-image",
+		DiffSource:  "QuantStack/Qwen-Image-GGUF",
+		DiffPattern: "Qwen_Image-{quant}.gguf",
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		Description: "Qwen-Image - text-to-image (Qwen2.5-VL encoder).",
+	},
 }
 
-// Names returns the curated model names, sorted.
-func Names() []string {
-	out := make([]string, 0, len(curated))
-	for _, m := range curated {
-		out = append(out, m.Name)
+// source is the curated model's own diffusion repo, an override, or the
+// architecture's companion. ok=false when nothing publishes the role.
+func (m Model) source(role types.Role, arch archdb.Arch) (archdb.Companion, bool) {
+	if role == types.RoleDiffusion {
+		// The diffusion weights are the model; they are never a companion.
+		return archdb.Companion{Source: m.DiffSource, FilePattern: m.DiffPattern, Quantized: true, Quants: m.Quants}, true
+	}
+	if c, ok := m.Overrides[role]; ok {
+		return c, true
+	}
+	c, ok := arch.Companions[role]
+	return c, ok
+}
+
+func modelName(m Model) string { return m.Name }
+func loraName(l Lora) string   { return l.Name }
+
+func sortedNames[T any](table []T, name func(T) string) []string {
+	out := make([]string, len(table))
+	for i, e := range table {
+		out[i] = name(e)
 	}
 	slices.Sort(out)
 	return out
 }
 
-// Lookup returns the curated Model with the given friendly name.
-func Lookup(name string) (Model, bool) {
-	for _, m := range curated {
-		if m.Name == name {
-			return m, true
+// byName scans: the tables are tiny and read far more often than they change.
+func byName[T any](table []T, name func(T) string, want string) (T, bool) {
+	for _, e := range table {
+		if name(e) == want {
+			return e, true
 		}
 	}
-	return Model{}, false
+	var zero T
+	return zero, false
 }
 
-// Resolve builds a manifest template for name at the given quant. Component
-// Blob fields are left empty (filled by the puller once files are downloaded).
-// If the requested quant is not among the model's Quants, it falls back to the
-// first available quant. Returns ok=false for unknown names.
+func Names() []string { return sortedNames(curated, modelName) }
+
+func Lookup(name string) (Model, bool) { return byName(curated, modelName, name) }
+
+// Resolve builds a manifest template for name at the given quant, falling back
+// through archdb.QuantChain when the model does not publish it. ok=false for an
+// unknown name.
 func Resolve(name, quant string) (types.Manifest, bool) {
 	m, ok := Lookup(name)
 	if !ok {
@@ -185,50 +169,10 @@ func Resolve(name, quant string) (types.Manifest, bool) {
 	if !ok {
 		return types.Manifest{}, false // curated data references an unknown arch
 	}
+	arch = arch.For(m.DiffSource, m.DiffPattern)
 
-	// Choose the quant: honor the request when available, else fall back to the
-	// model's first curated quant.
-	chosen := quant
-	if !slices.Contains(m.Quants, quant) && len(m.Quants) > 0 {
-		chosen = m.Quants[0]
-	}
-
-	comps := make([]types.Component, 0, len(arch.Required)+len(arch.Optional))
-
-	// Diffusion weights come from the curated model itself, never a companion.
-	comps = append(comps, types.Component{
-		Role:   types.RoleDiffusion,
-		File:   strings.ReplaceAll(m.DiffPattern, "{quant}", chosen),
-		Source: m.DiffSource,
-	})
-
-	// Shared components: every required role plus any optional role that has a
-	// companion. Diffusion is handled above (and has no companion), so it is
-	// naturally skipped by the no-companion check.
-	roles := make([]types.Role, 0, len(arch.Required)+len(arch.Optional))
-	roles = append(roles, arch.Required...)
-	roles = append(roles, arch.Optional...)
-	for _, role := range roles {
-		if role == types.RoleDiffusion {
-			continue
-		}
-		comp, ok := m.Overrides[role]
-		if !ok {
-			comp, ok = arch.Companions[role]
-		}
-		if !ok {
-			continue // no known source for this role; skip
-		}
-		file := comp.FilePattern
-		if comp.Quantized {
-			file = strings.ReplaceAll(file, "{quant}", chosen)
-		}
-		comps = append(comps, types.Component{
-			Role:   role,
-			File:   file,
-			Source: comp.Source,
-		})
-	}
+	pref, _ := archdb.ParseQuant(quant)
+	chosen := pickQuant(pref, m.Quants)
 
 	engine := arch.EngineSpec()
 	if len(m.ExtraModelArgs) > 0 {
@@ -238,11 +182,32 @@ func Resolve(name, quant string) (types.Manifest, bool) {
 		maps.Copy(engine.ModelArgs, m.ExtraModelArgs)
 	}
 
-	return types.Manifest{
-		Name:         m.Name,
-		Architecture: arch.Name,
-		Mode:         arch.Mode,
-		Components:   comps,
-		Engine:       engine,
-	}, true
+	man, _ := archdb.Build(arch, archdb.BuildOpts{
+		Name:   m.Name,
+		Repo:   m.DiffSource,
+		Hints:  []string{m.DiffPattern},
+		Engine: engine,
+		Resolve: func(role types.Role) (types.Component, bool) {
+			comp, ok := m.source(role, arch)
+			if !ok {
+				return types.Component{}, false
+			}
+			file := comp.FilePattern
+			if comp.Quantized {
+				// Each source gets the best label IT publishes, not the
+				// diffusion weights' label verbatim: unsloth's Qwen3-8B has no
+				// Q4_0 at all, and a blind substitution 404s after gigabytes.
+				file = strings.ReplaceAll(file, "{quant}", string(pickQuant(chosen, comp.Quants)))
+			}
+			return types.Component{Role: role, File: file, Source: comp.Source}, true
+		},
+	})
+	return man, true
+}
+
+func pickQuant(pref archdb.Quant, have []archdb.Quant) archdb.Quant {
+	if q, ok := archdb.PickQuant(pref, have); ok {
+		return q
+	}
+	return pref
 }
