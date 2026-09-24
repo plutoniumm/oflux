@@ -65,7 +65,7 @@ func newPuller(t *testing.T, hub *httptest.Server) *Puller {
 
 func TestResolveCurated(t *testing.T) {
 	p := newPuller(t, fakeHub(nil))
-	v, err := p.Resolve(context.Background(), "qwen-image-edit", "Q8_0", "")
+	v, err := p.Resolve(context.Background(), "qwe-2511", "Q8_0", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,17 +12,17 @@ import (
 func TestNamesSorted(t *testing.T) {
 	got := Names()
 	want := []string{
-		"flux.1-dev",
-		"flux.1-kontext",
-		"flux.1-krea",
-		"flux.1-schnell",
-		"flux.2-klein",
-		"flux.2-klein-9b",
-		"qwen-image",
-		"qwen-image-2.1",
-		"qwen-image-2.1-uncensored",
-		"qwen-image-edit",
-		"z-image-turbo",
+		"flx-1-dev",
+		"flx-1-kontext",
+		"flx-1-krea",
+		"flx-1-schnell",
+		"flx-2-klein-4b",
+		"flx-2-klein-9b",
+		"qwe-2.1",
+		"qwe-2.1-uc",
+		"qwe-2511",
+		"qwi-1",
+		"zim-1-turbo",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("Names() = %v, want %v", got, want)
@@ -33,9 +33,9 @@ func TestNamesSorted(t *testing.T) {
 }
 
 func TestLookup(t *testing.T) {
-	m, ok := Lookup("qwen-image-edit")
+	m, ok := Lookup("qwe-2511")
 	if !ok {
-		t.Fatal("Lookup(qwen-image-edit) not found")
+		t.Fatal("Lookup(qwe-2511) not found")
 	}
 	if m.Arch != "qwen-image-edit" {
 		t.Fatalf("Arch = %q, want qwen-image-edit", m.Arch)
@@ -46,7 +46,7 @@ func TestLookup(t *testing.T) {
 }
 
 func TestResolveQwenImageEdit(t *testing.T) {
-	m, ok := Resolve("qwen-image-edit", "Q8_0")
+	m, ok := Resolve("qwe-2511", "Q8_0")
 	if !ok {
 		t.Fatal("Resolve(qwen-image-edit, Q8_0) not ok")
 	}
@@ -61,8 +61,8 @@ func TestResolveQwenImageEdit(t *testing.T) {
 	if m.Architecture != "qwen-image-edit" {
 		t.Fatalf("Architecture = %q, want qwen-image-edit", m.Architecture)
 	}
-	if m.Name != "qwen-image-edit" {
-		t.Fatalf("Name = %q, want qwen-image-edit", m.Name)
+	if m.Name != "qwe-2511" {
+		t.Fatalf("Name = %q, want qwe-2511", m.Name)
 	}
 
 	diff, ok := m.Component(types.RoleDiffusion)
@@ -93,7 +93,7 @@ func TestResolveQwenImageEdit(t *testing.T) {
 }
 
 func TestResolveQwenVAE(t *testing.T) {
-	m, _ := Resolve("qwen-image-edit", "Q8_0")
+	m, _ := Resolve("qwe-2511", "Q8_0")
 	vae, ok := m.Component(types.RoleVAE)
 	if !ok {
 		t.Fatal("no vae component")
@@ -104,7 +104,7 @@ func TestResolveQwenVAE(t *testing.T) {
 }
 
 func TestResolveFluxKontext(t *testing.T) {
-	m, ok := Resolve("flux.1-kontext", "Q6_K")
+	m, ok := Resolve("flx-1-kontext", "Q6_K")
 	if !ok {
 		t.Fatal("Resolve(flux.1-kontext, Q6_K) not ok")
 	}
@@ -134,7 +134,7 @@ func TestResolveFluxKontext(t *testing.T) {
 }
 
 func TestResolveZImageTurbo(t *testing.T) {
-	m, ok := Resolve("z-image-turbo", "Q8_0")
+	m, ok := Resolve("zim-1-turbo", "Q8_0")
 	if !ok {
 		t.Fatal("Resolve(z-image-turbo, Q8_0) not ok")
 	}
@@ -156,7 +156,7 @@ func TestResolveZImageTurbo(t *testing.T) {
 func TestResolveQuantFallback(t *testing.T) {
 	// A label the model does not publish walks archdb's chain; nothing in the
 	// table is unquantized, so an F16 request lands on the best quant there is.
-	m, ok := Resolve("flux.1-kontext", "F16")
+	m, ok := Resolve("flx-1-kontext", "F16")
 	if !ok {
 		t.Fatal("Resolve fallback not ok")
 	}
@@ -206,7 +206,7 @@ func TestResolveNoQuantLeftover(t *testing.T) {
 // FLUX.2 klein uses Qwen3-4B as its text encoder, NOT the Mistral-3 encoder
 // that flux2-dev uses — getting these crossed would load the wrong weights.
 func TestResolveFlux2Klein(t *testing.T) {
-	m, ok := Resolve("flux.2-klein", "Q8_0")
+	m, ok := Resolve("flx-2-klein-4b", "Q8_0")
 	if !ok {
 		t.Fatal("flux.2-klein should resolve")
 	}
@@ -242,7 +242,7 @@ func TestResolveFlux2Klein(t *testing.T) {
 // Handing a 9B klein the 4B's encoder does not fail cleanly: the engine dies
 // with "'…q_norm.weight' not in model metadata" and a shape mismatch.
 func TestResolveFlux2Klein9B(t *testing.T) {
-	m, ok := Resolve("flux.2-klein-9b", "Q8_0")
+	m, ok := Resolve("flx-2-klein-9b", "Q8_0")
 	if !ok {
 		t.Fatal("flux.2-klein-9b should resolve")
 	}
@@ -257,7 +257,7 @@ func TestResolveFlux2Klein9B(t *testing.T) {
 	if !ok || llm.Source != "unsloth/Qwen3-8B-GGUF" || llm.File != "Qwen3-8B-Q8_0.gguf" {
 		t.Errorf("llm should be the Qwen3-8B encoder, got %+v", llm)
 	}
-	four, _ := Resolve("flux.2-klein", "Q8_0")
+	four, _ := Resolve("flx-2-klein-4b", "Q8_0")
 	if llm4, _ := four.Component(types.RoleLLM); llm4.Source != "unsloth/Qwen3-4B-GGUF" {
 		t.Errorf("klein-4B llm = %+v", llm4)
 	}
@@ -265,7 +265,7 @@ func TestResolveFlux2Klein9B(t *testing.T) {
 
 // unsloth's Qwen3-8B has no Q4_0, so a Q4_0 klein-9B must not name one.
 func TestResolveCompanionQuantSafetyNet(t *testing.T) {
-	m, ok := Resolve("flux.2-klein-9b", "Q4_0")
+	m, ok := Resolve("flx-2-klein-9b", "Q4_0")
 	if !ok {
 		t.Fatal("flux.2-klein-9b@Q4_0 should resolve")
 	}
@@ -322,10 +322,10 @@ func TestResolveCuratedQuantsArePublished(t *testing.T) {
 // The friendly name hides which checkpoint a model actually is.
 func TestResolveBaseAndRevision(t *testing.T) {
 	cases := map[string][2]string{
-		"qwen-image-edit": {"Qwen-Image-Edit-2511", "2511"},
-		"flux.1-dev":      {"FLUX.1-dev", ""},
-		"flux.2-klein-9b": {"FLUX.2-klein-9B", ""},
-		"z-image-turbo":   {"Z-Image-Turbo", ""},
+		"qwe-2511":       {"Qwen-Image-Edit-2511", "2511"},
+		"flx-1-dev":      {"FLUX.1-dev", ""},
+		"flx-2-klein-9b": {"FLUX.2-klein-9B", ""},
+		"zim-1-turbo":    {"Z-Image-Turbo", ""},
 	}
 	for name, want := range cases {
 		m, ok := Resolve(name, "Q8_0")
@@ -342,7 +342,7 @@ func TestResolveBaseAndRevision(t *testing.T) {
 // tower; taking any of the three from qwen-image-edit produces a model that
 // loads and then generates garbage, or refuses to see the reference image.
 func TestResolveQwenImage21(t *testing.T) {
-	for _, name := range []string{"qwen-image-2.1", "qwen-image-2.1-uncensored"} {
+	for _, name := range []string{"qwe-2.1", "qwe-2.1-uc"} {
 		m, ok := Resolve(name, "Q8_0")
 		if !ok {
 			t.Fatalf("Resolve(%s) not ok", name)
@@ -358,7 +358,7 @@ func TestResolveQwenImage21(t *testing.T) {
 		// by Qwen3-VL, so leaving the stock one in place ablates only half the
 		// pipeline.
 		wantLLM, wantMM := "Qwen3VL-8B-Instruct-Q8_0.gguf", "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
-		if name == "qwen-image-2.1-uncensored" {
+		if name == "qwe-2.1-uc" {
 			wantLLM, wantMM = "qwen3vl_8b_heretic-Q8_0.gguf", "mmproj-qwen3vl_8b_heretic-f16.gguf"
 		}
 		llm, _ := m.Component(types.RoleLLM)
@@ -377,8 +377,8 @@ func TestResolveQwenImage21(t *testing.T) {
 	}
 
 	// The two entries differ only in the diffusion weights.
-	base, _ := Resolve("qwen-image-2.1", "Q8_0")
-	unc, _ := Resolve("qwen-image-2.1-uncensored", "Q8_0")
+	base, _ := Resolve("qwe-2.1", "Q8_0")
+	unc, _ := Resolve("qwe-2.1-uc", "Q8_0")
 	bd, _ := base.Component(types.RoleDiffusion)
 	ud, _ := unc.Component(types.RoleDiffusion)
 	if bd.File != "qwen_image_2.1-Q8_0.gguf" || ud.File != "qwen-image-2.1-UC-Q8_0.gguf" {
@@ -389,7 +389,7 @@ func TestResolveQwenImage21(t *testing.T) {
 // leejet spells the K-quants bare, so a Q4_K_M request must land on Q4_K and
 // not fall all the way down to Q4_0.
 func TestResolveQwenImage21BareKQuants(t *testing.T) {
-	m, _ := Resolve("qwen-image-2.1", "Q4_K_M")
+	m, _ := Resolve("qwe-2.1", "Q4_K_M")
 	d, _ := m.Component(types.RoleDiffusion)
 	if d.File != "qwen_image_2.1-Q4_K.gguf" {
 		t.Errorf("diffusion = %q, want qwen_image_2.1-Q4_K.gguf", d.File)

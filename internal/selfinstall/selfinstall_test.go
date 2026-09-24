@@ -26,6 +26,8 @@ func TestLinkCLINeverDeletesARealBinary(t *testing.T) {
 	if err := os.MkdirAll(localBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Confine the search: the system candidates come first and are real.
+	t.Setenv("OFLUX_BIN_DIR", localBin)
 	realIn := filepath.Join(localBin, "oflux")
 	if err := os.WriteFile(realIn, []byte("real"), 0o755); err != nil {
 		t.Fatal(err)
@@ -50,6 +52,8 @@ func TestLinkCLIReplacesOwnSymlink(t *testing.T) {
 	if err := os.MkdirAll(localBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Without this the real /opt/homebrew/bin is tried first and clobbered.
+	t.Setenv("OFLUX_BIN_DIR", localBin)
 	link := filepath.Join(localBin, "oflux")
 	if err := os.Symlink("/old/oflux.app/Contents/MacOS/oflux", link); err != nil {
 		t.Fatal(err)

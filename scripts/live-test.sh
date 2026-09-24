@@ -17,11 +17,11 @@ case "$v" in "oflux "[0-9]*) ok "oflux version ($v)" ;; *) no "version: ${v:-<no
 curl -s $BASE/api/tags | grep -q '"models"'      && ok "/api/tags"   || no "/api/tags"
 curl -s $BASE/api/ps   | grep -q '"loaded"'       && ok "/api/ps"     || no "/api/ps"
 curl -s $BASE/v1/models| grep -q '"object":"list"'&& ok "/v1/models"  || no "/v1/models"
-oflux list 2>/dev/null | grep -q qwen-image-edit  && ok "CLI: oflux list" || no "oflux list"
+oflux list 2>/dev/null | grep -q qwe-2511  && ok "CLI: oflux list" || no "oflux list"
 
 echo "== live generation (native JSON, z-image on Metal) =="
 c=$(curl -s -o "$OUT/gen.json" -w '%{http_code}' --max-time 600 -X POST $BASE/v1/generate \
-  -H 'Content-Type: application/json' -d '{"model":"z-image-turbo","prompt":"a mossy stone bridge over a river, photograph","steps":8}')
+  -H 'Content-Type: application/json' -d '{"model":"zim-1-turbo","prompt":"a mossy stone bridge over a river, photograph","steps":8}')
 if [ "$c" = 200 ]; then
   python3 -c "import json,base64;d=json.load(open('$OUT/gen.json'));open('$OUT/gen.png','wb').write(base64.b64decode(d['images'][0]))"
   ispng "$OUT/gen.png" && ok "generate -> valid PNG ($(du -h "$OUT/gen.png"|cut -f1))" || no "generate: not a PNG"
@@ -29,14 +29,14 @@ else no "generate HTTP $c: $(head -c200 "$OUT/gen.json")"; fi
 
 echo "== OpenAI-compat generation (/v1/images/generations) =="
 c=$(curl -s -o "$OUT/oai.json" -w '%{http_code}' --max-time 600 -X POST $BASE/v1/images/generations \
-  -H 'Content-Type: application/json' -d '{"model":"z-image-turbo","prompt":"a red maple leaf on snow","size":"512x512"}')
+  -H 'Content-Type: application/json' -d '{"model":"zim-1-turbo","prompt":"a red maple leaf on snow","size":"512x512"}')
 if [ "$c" = 200 ] && python3 -c "import json;assert json.load(open('$OUT/oai.json'))['data'][0]['b64_json']" 2>/dev/null; then
   ok "/v1/images/generations (OpenAI shape)"
 else no "openai generate HTTP $c"; fi
 
 echo "== live edit (ref-image path, flux-kontext on Metal) =="
 if [ -f "$OUT/gen.png" ]; then
-  python3 -c "import json,base64;b=base64.b64encode(open('$OUT/gen.png','rb').read()).decode();json.dump({'model':'flux.1-kontext','prompt':'turn it into a watercolor painting','image':b},open('$OUT/editbody.json','w'))"
+  python3 -c "import json,base64;b=base64.b64encode(open('$OUT/gen.png','rb').read()).decode();json.dump({'model':'flx-1-kontext','prompt':'turn it into a watercolor painting','image':b},open('$OUT/editbody.json','w'))"
   c=$(curl -s -o "$OUT/edit.json" -w '%{http_code}' --max-time 900 -X POST $BASE/v1/edit \
     -H 'Content-Type: application/json' -d @"$OUT/editbody.json")
   if [ "$c" = 200 ]; then
@@ -55,7 +55,7 @@ else no "edit skipped (no input image)"; fi
 echo "== error handling =="
 c=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/edit -H 'Content-Type: application/json' -d '{"model":"nope","prompt":"x","image":"x"}')
 [ "$c" = 404 ] && ok "unknown model -> 404" || no "unknown model -> $c"
-c=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/edit -H 'Content-Type: application/json' -d '{"model":"z-image-turbo","prompt":"x"}')
+c=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/edit -H 'Content-Type: application/json' -d '{"model":"zim-1-turbo","prompt":"x"}')
 [ "$c" = 400 ] && ok "edit without image -> 400" || no "edit w/o image -> $c"
 
 echo "== segmentation + masked edit (SAM3) =="
@@ -72,7 +72,7 @@ case "$seg" in
 esac
 
 if [ "$seg" = 200 ] && [ -f "$OUT/gen.png" ]; then
-  python3 -c "import json,base64;b=base64.b64encode(open('$OUT/gen.png','rb').read()).decode();json.dump({'model':'qwen-image-edit','prompt':'make it a stone arch','mask_prompt':'the bridge','image':b},open('$OUT/maskbody.json','w'))"
+  python3 -c "import json,base64;b=base64.b64encode(open('$OUT/gen.png','rb').read()).decode();json.dump({'model':'qwe-2511','prompt':'make it a stone arch','mask_prompt':'the bridge','image':b},open('$OUT/maskbody.json','w'))"
   c=$(curl -s -o "$OUT/maskedit.json" -w '%{http_code}' --max-time 900 -X POST $BASE/v1/edit \
     -H 'Content-Type: application/json' -d @"$OUT/maskbody.json")
   if [ "$c" = 200 ]; then
@@ -83,7 +83,7 @@ if [ "$seg" = 200 ] && [ -f "$OUT/gen.png" ]; then
   # A prompt that matches nothing must 422, never a silent whole-image edit.
   c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 600 -X POST $BASE/v1/edit \
     -H 'Content-Type: application/json' \
-    -d "{\"model\":\"qwen-image-edit\",\"prompt\":\"x\",\"mask_prompt\":\"a purple giraffe wearing a top hat\",\"image\":\"$(python3 -c "import base64;print(base64.b64encode(open('$OUT/gen.png','rb').read()).decode())")\"}")
+    -d "{\"model\":\"qwe-2511\",\"prompt\":\"x\",\"mask_prompt\":\"a purple giraffe wearing a top hat\",\"image\":\"$(python3 -c "import base64;print(base64.b64encode(open('$OUT/gen.png','rb').read()).decode())")\"}")
   [ "$c" = 422 ] && ok "mask_prompt with no match -> 422" || no "mask_prompt no-match -> $c"
 fi
 

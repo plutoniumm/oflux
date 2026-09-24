@@ -517,7 +517,7 @@ func (s *Server) validate(req *ImageRequest, mode types.Mode) (types.Manifest, e
 	// Alpha is a property of the weights, not a switch, so a model that lacks
 	// it would silently return an opaque image and look like it worked.
 	if req.Transparent && !archdb.SupportsAlpha(m.Architecture) {
-		return m, badRequest("model %q cannot emit transparency — install one that can: oflux pull qwen-image-2.1", m.Name)
+		return m, badRequest("model %q cannot emit transparency — install one that can: oflux pull qwe-2.1", m.Name)
 	}
 
 	// Before spawning an engine: a missing adapter would otherwise surface as an

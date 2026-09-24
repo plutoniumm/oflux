@@ -20,7 +20,7 @@ From source: `make engine && make install` (needs Go and `brew install librsvg`)
 ## Use
 
 ```bash
-oflux pull qwen-image-edit flux.2-klein   # curated names or Hugging Face repos
+oflux pull qwe-2511 flx-2-klein-4b  # curated names or Hugging Face repos
 oflux list / ps
 oflux rm <name>...                        # several at a time
 ```
@@ -29,7 +29,7 @@ Then open <http://localhost:11534> for the UI, or:
 
 ```bash
 curl localhost:11534/v1/edit -d '{
-  "model": "qwen-image-edit",
+  "model": "qwe-2511",
   "prompt": "make it night time",
   "image": "data:image/png;base64,..."
 }'
@@ -45,7 +45,7 @@ refs, "put this in that".
 
 ```bash
 curl localhost:11534/v1/edit -d '{
-  "model": "qwen-image-edit",
+  "model": "qwe-2511",
   "prompt": "put the person from the second image on this bench",
   "image": ["data:image/png;base64,...", "data:image/png;base64,..."]
 }'
@@ -58,7 +58,7 @@ Optional fields: `loras[]`, `ref_images[]`, `mask` (white = edit),
 `guidance{txt_cfg,img_cfg,distilled_guidance,slg}`.
 
 `transparent: true` asks for an RGBA result on a model whose weights can produce
-one — today that is `qwen-image-2.1`, which `/api/tags` marks with `"alpha":
+one — today that is `qwe-2.1`, which `/api/tags` marks with `"alpha":
 true`. There is no engine switch for it: the model decides from the wording of
 the prompt, so oflux supplies the phrasing Qwen prescribes. Asking a model that
 cannot is a 400 rather than a silently opaque image.
@@ -101,7 +101,7 @@ A distilled LoRA is only correct at its trained steps and cfg, so bake the
 combination once and call it by name:
 
 ```bash
-oflux preset add qwen8 --model qwen-image-edit \
+oflux preset add qwen8 --model qwe-2511 \
   --lora qwen-edit-lightning-8step --steps 8 --cfg 1 --label "Qwen 2511 (8-step)"
 ```
 
@@ -138,7 +138,7 @@ oflux lora pull <org>/<repo> --file <path-in-repo> --as <name>
 
 ```bash
 curl localhost:11534/v1/edit -d '{
-  "model": "qwen-image-edit",
+  "model": "qwe-2511",
   "prompt": "make it night time",
   "image": "data:image/png;base64,...",
   "loras": [{"name": "qwen-edit-lightning-4step", "scale": 1.0}]
@@ -150,7 +150,7 @@ curl localhost:11534/v1/edit -d '{
 | `qwen-2.1-turbo-6step` | `qwen-image-2.1` | 6 |
 | `qwen-edit-lightning-4step` / `-8step` | `qwen-image-edit` | 4 / 8 |
 | `qwen-image-lightning-4step` | `qwen-image` | 4 |
-| `flux-turbo-8step`, `flux-hyper-8step` | `flux.1-dev`, `flux.1-krea` | 8 |
+| `flux-turbo-8step`, `flux-hyper-8step` | `flux` | 8 |
 
 A curated step-distillation adapter also supplies its sampling regime (steps and
 cfg), because running one at the base model's defaults produces burnt output.
@@ -176,14 +176,22 @@ only — none of the curated models above support it.
 
 | Name | Task |
 |------|------|
-| `qwen-image-2.1` | **both** — newest; 10 reference images, transparent output |
-| `qwen-image-2.1-uncensored` | **both** — the same weights, abliterated |
-| `qwen-image-edit` | **both** — best instruction following |
-| `flux.2-klein` | **both** — 4-step, fast |
-| `flux.2-klein-9b` | **both** — the larger klein |
-| `flux.1-kontext` | **edit** |
-| `z-image-turbo` | generate — fast |
-| `flux.1-krea`, `flux.1-dev`, `flux.1-schnell`, `qwen-image` | generate |
+| `qwe-2.1` | **both** — newest; 10 reference images, transparent output |
+| `qwe-2.1-uc` | **both** — the same weights, abliterated |
+| `qwe-2511` | **both** — best instruction following |
+| `flx-2-klein-4b` | **both** — 4-step, fast |
+| `flx-2-klein-9b` | **both** — the larger klein |
+| `flx-1-kontext` | **edit** |
+| `zim-1-turbo` | generate — fast |
+| `flx-1-krea`, `flx-1-dev`, `flx-1-schnell`, `qwi-1` | generate |
+
+Curated names changed in 1.3.1 to `<line><version>[-modifier]`, so successive
+checkpoints of one line coexist (`qwe-2511` and `qwe-2.1` are both installable)
+instead of one name quietly meaning whichever is newest. There are no aliases:
+`oflux pull qwen-image-edit` now fails. Models you already installed keep their
+old names until you run `./scripts/migrate-names.sh` once per machine — it
+renames the manifests and re-points any presets, and `DRY=1` shows the plan
+without touching anything.
 
 "both" is a hybrid: the same weights edit when given an image and generate from
 text alone. Quantized weights (Q8_0 by default) are preferred and pulled from

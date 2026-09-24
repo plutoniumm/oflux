@@ -18,22 +18,22 @@ it unusable.
 ## Models
 
 ```bash
-oflux pull qwen-image-edit
+oflux pull qwe-2511
 ```
 
 | Name | Does | Architecture | Pulled from | What it is |
 |------|------|--------------|-------------|------------|
-| `qwen-image-2.1` | **both** | `qwen-image-2.1` | `leejet/Qwen-Image-2.1-GGUF` | Qwen-Image 2.1 — unified text-to-image and editing, up to 10 reference images, native RGBA (Qwen3-VL-8B encoder). Non-commercial licence. |
-| `qwen-image-2.1-uncensored` | **both** | `qwen-image-2.1` | `abenzerps/Qwen-Image-2.1-Uncensored-GGUF` | Qwen-Image 2.1, abliterated — as above with the refusal direction removed. Third-party weights. |
-| `qwen-image-edit` | **both** | `qwen-image-edit` | `unsloth/Qwen-Image-Edit-2511-GGUF` | Qwen-Image-Edit 2511 — instruction image editing (Qwen2.5-VL encoder). |
-| `flux.1-kontext` | edit | `flux-kontext` | `QuantStack/FLUX.1-Kontext-dev-GGUF` | FLUX.1 Kontext [dev] — in-context image editing. |
-| `flux.2-klein` | **both** | `flux2-klein` | `leejet/FLUX.2-klein-4B-GGUF` | FLUX.2 klein 4B — few-step text-to-image and editing (Qwen3-4B encoder). |
-| `flux.2-klein-9b` | **both** | `flux2-klein` | `leejet/FLUX.2-klein-9B-GGUF` | FLUX.2 klein 9B — few-step text-to-image and editing (Qwen3-8B encoder). |
-| `z-image-turbo` | generate | `z-image` | `leejet/Z-Image-Turbo-GGUF` | Z-Image Turbo — fast few-step text-to-image (Qwen3-4B encoder). |
-| `flux.1-krea` | generate | `flux` | `QuantStack/FLUX.1-Krea-dev-GGUF` | FLUX.1 Krea [dev] — photographic text-to-image. |
-| `flux.1-dev` | generate | `flux` | `city96/FLUX.1-dev-gguf` | FLUX.1 [dev] — guidance-distilled text-to-image. |
-| `flux.1-schnell` | generate | `flux` | `city96/FLUX.1-schnell-gguf` | FLUX.1 [schnell] — fast few-step text-to-image (Apache-2.0). |
-| `qwen-image` | generate | `qwen-image` | `QuantStack/Qwen-Image-GGUF` | Qwen-Image — text-to-image (Qwen2.5-VL encoder). |
+| `qwe-2.1` | **both** | `qwen-image-2.1` | `leejet/Qwen-Image-2.1-GGUF` | Qwen-Image 2.1 — unified text-to-image and editing, up to 10 reference images, native RGBA (Qwen3-VL-8B encoder). Non-commercial licence. |
+| `qwe-2.1-uc` | **both** | `qwen-image-2.1` | `abenzerps/Qwen-Image-2.1-Uncensored-GGUF` | Qwen-Image 2.1, abliterated — as above with the refusal direction removed. Third-party weights. |
+| `qwe-2511` | **both** | `qwen-image-edit` | `unsloth/Qwen-Image-Edit-2511-GGUF` | Qwen-Image-Edit 2511 — instruction image editing (Qwen2.5-VL encoder). |
+| `flx-1-kontext` | edit | `flux-kontext` | `QuantStack/FLUX.1-Kontext-dev-GGUF` | FLUX.1 Kontext [dev] — in-context image editing. |
+| `flx-2-klein-4b` | **both** | `flux2-klein` | `leejet/FLUX.2-klein-4B-GGUF` | FLUX.2 klein 4B — few-step text-to-image and editing (Qwen3-4B encoder). |
+| `flx-2-klein-9b` | **both** | `flux2-klein` | `leejet/FLUX.2-klein-9B-GGUF` | FLUX.2 klein 9B — few-step text-to-image and editing (Qwen3-8B encoder). |
+| `zim-1-turbo` | generate | `z-image` | `leejet/Z-Image-Turbo-GGUF` | Z-Image Turbo — fast few-step text-to-image (Qwen3-4B encoder). |
+| `flx-1-krea` | generate | `flux` | `QuantStack/FLUX.1-Krea-dev-GGUF` | FLUX.1 Krea [dev] — photographic text-to-image. |
+| `flx-1-dev` | generate | `flux` | `city96/FLUX.1-dev-gguf` | FLUX.1 [dev] — guidance-distilled text-to-image. |
+| `flx-1-schnell` | generate | `flux` | `city96/FLUX.1-schnell-gguf` | FLUX.1 [schnell] — fast few-step text-to-image (Apache-2.0). |
+| `qwi-1` | generate | `qwen-image` | `QuantStack/Qwen-Image-GGUF` | Qwen-Image — text-to-image (Qwen2.5-VL encoder). |
 
 Which quant labels each of these publishes is
 [its own table below](#what-each-model-publishes).
@@ -46,7 +46,7 @@ The **architecture** column is what LoRAs match on: an adapter trained for
 `flux` applies to every model in the `flux` row.
 
 A friendly name hides which checkpoint it actually is, so `oflux list` and
-`GET /api/tags` report the identity alongside it: `base` (for `qwen-image-edit`,
+`GET /api/tags` report the identity alongside it: `base` (for `qwe-2511`,
 `Qwen-Image-Edit-2511`) and, when the publisher dates its releases, `revision`
 (`2511`). That is the answer to "which checkpoint is this really".
 
@@ -64,7 +64,7 @@ them from their own pinned repos and caches them once:
 | `qwen-image`, `qwen-image-edit` | VAE `Comfy-Org/Qwen-Image_ComfyUI` · LLM encoder `mradermacher/Qwen2.5-VL-7B-Instruct-GGUF` (quantized) |
 | `qwen-image-2.1` | VAE `Comfy-Org/Qwen-Image-2.1` · LLM encoder + vision tower `Qwen/Qwen3-VL-8B-Instruct-GGUF` (quantized) |
 
-`qwen-image-2.1-uncensored` overrides the encoder with the matching abliterated
+`qwe-2.1-uc` overrides the encoder with the matching abliterated
 build, `pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF` — the prompt is read
 by Qwen3-VL, so ablating only the diffusion weights does half the job.
 
@@ -87,7 +87,7 @@ Quantized weights are preferred and come from GGUF mirrors. The default is
 `Q8_0` (`default_quant` in `~/.oflux/config.json`); override it per pull:
 
 ```bash
-oflux pull qwen-image-edit --quant Q4_K_M      # or -q
+oflux pull qwe-2511 --quant Q4_K_M      # or -q
 ```
 
 ### What each model publishes
@@ -96,17 +96,17 @@ These are the labels each diffusion repo really ships, best first:
 
 | Model | Quant labels |
 |-------|--------------|
-| `qwen-image-2.1` | `Q8_0` `Q6_K` `Q5_0` `Q4_K` `Q4_0` `Q3_K` `Q2_K` |
-| `qwen-image-2.1-uncensored` | `BF16` `Q8_0` `Q6_K` `Q5_K_M` `Q4_K_M` `Q4_0` |
-| `qwen-image-edit` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_L` `Q3_K_M` `Q3_K_S` `Q2_K` |
-| `flux.1-kontext` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
-| `flux.2-klein` | `Q8_0` `Q4_0` |
-| `flux.2-klein-9b` | `Q8_0` `Q4_0` |
-| `z-image-turbo` | `Q8_0` `Q6_K` `Q5_0` `Q4_K` `Q4_0` `Q3_K` `Q2_K` |
-| `flux.1-krea` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
-| `flux.1-dev` | `Q8_0` `Q6_K` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_S` `Q2_K` |
-| `flux.1-schnell` | `Q8_0` `Q6_K` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_S` `Q2_K` |
-| `qwen-image` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
+| `qwe-2.1` | `Q8_0` `Q6_K` `Q5_0` `Q4_K` `Q4_0` `Q3_K` `Q2_K` |
+| `qwe-2.1-uc` | `BF16` `Q8_0` `Q6_K` `Q5_K_M` `Q4_K_M` `Q4_0` |
+| `qwe-2511` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_L` `Q3_K_M` `Q3_K_S` `Q2_K` |
+| `flx-1-kontext` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
+| `flx-2-klein-4b` | `Q8_0` `Q4_0` |
+| `flx-2-klein-9b` | `Q8_0` `Q4_0` |
+| `zim-1-turbo` | `Q8_0` `Q6_K` `Q5_0` `Q4_K` `Q4_0` `Q3_K` `Q2_K` |
+| `flx-1-krea` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
+| `flx-1-dev` | `Q8_0` `Q6_K` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_S` `Q2_K` |
+| `flx-1-schnell` | `Q8_0` `Q6_K` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_S` `Q2_K` |
+| `qwi-1` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
 
 The list describes the **diffusion repo alone**. Nothing is hand-intersected
 with the encoders any more.
@@ -124,7 +124,7 @@ walking one shared fallback chain:
 4. whatever else is quantized, with full precision (`F16`/`BF16`/`F32`) last —
    those are enormous rather than wrong.
 
-So `oflux pull flux.2-klein-9b --quant Q4_0` takes the `Q4_0` diffusion weights
+So `oflux pull flx-2-klein-9b --quant Q4_0` takes the `Q4_0` diffusion weights
 it asked for and pairs them with the nearest Q4 the encoder repo does publish,
 `Q4_K_M`. The old behaviour was a 404 on a filename that never existed, after
 gigabytes had already downloaded.
@@ -146,8 +146,8 @@ oflux lora pull qwen-edit-lightning-4step
 | `flux-hyper-8step` | `flux` | 8 | 1.0 | ByteDance Hyper-SD 8-step distillation for FLUX.1 dev/Krea. |
 
 "Applies to" is an **architecture**, so `qwen-image-edit` covers the
-`qwen-image-edit` model and `flux` covers `flux.1-dev`, `flux.1-krea` and
-`flux.1-schnell`. Both `flux` adapters are trained on FLUX.1-dev; Krea is a dev
+`qwe-2511` model and `flux` covers `flx-1-dev`, `flx-1-krea` and
+`flx-1-schnell`. Both `flux` adapters are trained on FLUX.1-dev; Krea is a dev
 finetune sharing its weights layout, which is why the same adapter applies.
 
 ### Why step distillation is the win
@@ -168,8 +168,8 @@ the request overrides it.
 ### Models
 
 ```bash
-oflux pull qwen-image-edit                  # a curated name
-oflux pull qwen-image-edit flux.2-klein     # several at a time
+oflux pull qwe-2511                  # a curated name
+oflux pull qwe-2511 flux.2-klein     # several at a time
 oflux pull city96/FLUX.1-dev-gguf           # any Hugging Face repo
 ```
 
@@ -252,7 +252,7 @@ ignored field.
 
 ```bash
 curl localhost:11534/v1/edit -d '{
-  "model": "qwen-image-edit",
+  "model": "qwe-2511",
   "prompt": "make it night time",
   "image": "data:image/png;base64,...",
   "loras": [{"name": "qwen-edit-lightning-4step", "scale": 1.0}]

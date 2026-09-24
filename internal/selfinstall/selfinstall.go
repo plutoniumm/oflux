@@ -15,6 +15,15 @@ import (
 // BinDirs are the PATH directories tried when linking the CLI, most
 // conventional first. ~/.local/bin is created if it doesn't exist.
 func BinDirs() []string {
+	// OFLUX_BIN_DIR confines linking to one directory. Tests MUST set it: the
+	// defaults below are machine-wide, and a test that calls LinkCLI without it
+	// replaces the real /opt/homebrew/bin/oflux with a symlink into its own
+	// TempDir — which is deleted when the test ends, leaving the CLI dead on
+	// whatever machine ran `go test`. Sandboxing $HOME is not enough, because
+	// the system candidates are tried first and do not live under $HOME.
+	if d := os.Getenv("OFLUX_BIN_DIR"); d != "" {
+		return []string{d}
+	}
 	home, _ := os.UserHomeDir()
 	return []string{"/usr/local/bin", "/opt/homebrew/bin", filepath.Join(home, ".local", "bin")}
 }

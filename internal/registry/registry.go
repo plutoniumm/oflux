@@ -38,7 +38,7 @@ type Model struct {
 // archdb.PickQuant against their own labels, so nothing is hand-intersected.
 var curated = []Model{
 	{
-		Name:        "qwen-image-edit",
+		Name:        "qwe-2511",
 		Arch:        "qwen-image-edit",
 		DiffSource:  "unsloth/Qwen-Image-Edit-2511-GGUF",
 		DiffPattern: "qwen-image-edit-2511-{quant}.gguf",
@@ -48,7 +48,7 @@ var curated = []Model{
 		Description:    "Qwen-Image-Edit 2511 - instruction image editing (Qwen2.5-VL encoder).",
 	},
 	{
-		Name:        "flux.1-kontext",
+		Name:        "flx-1-kontext",
 		Arch:        "flux-kontext",
 		DiffSource:  "QuantStack/FLUX.1-Kontext-dev-GGUF",
 		DiffPattern: "flux1-kontext-dev-{quant}.gguf",
@@ -56,7 +56,7 @@ var curated = []Model{
 		Description: "FLUX.1 Kontext [dev] - in-context image editing.",
 	},
 	{
-		Name:        "flux.2-klein",
+		Name:        "flx-2-klein-4b",
 		Arch:        "flux2-klein",
 		DiffSource:  "leejet/FLUX.2-klein-4B-GGUF", // sd.cpp author's own conversion
 		DiffPattern: "flux-2-klein-4b-{quant}.gguf",
@@ -66,7 +66,7 @@ var curated = []Model{
 	{
 		// The 9B klein takes the Qwen3-8B encoder; archdb's klein variant picks
 		// it up from the "klein-9b" in the repo id and filename.
-		Name:        "flux.2-klein-9b",
+		Name:        "flx-2-klein-9b",
 		Arch:        "flux2-klein",
 		DiffSource:  "leejet/FLUX.2-klein-9B-GGUF",
 		DiffPattern: "flux-2-klein-9b-{quant}.gguf",
@@ -74,7 +74,7 @@ var curated = []Model{
 		Description: "FLUX.2 klein 9B - few-step text-to-image and editing (Qwen3-8B encoder).",
 	},
 	{
-		Name:        "z-image-turbo",
+		Name:        "zim-1-turbo",
 		Arch:        "z-image",
 		DiffSource:  "leejet/Z-Image-Turbo-GGUF",
 		DiffPattern: "z_image_turbo-{quant}.gguf",
@@ -82,7 +82,7 @@ var curated = []Model{
 		Description: "Z-Image Turbo - fast few-step text-to-image (Qwen3-4B encoder).",
 	},
 	{
-		Name:        "flux.1-krea",
+		Name:        "flx-1-krea",
 		Arch:        "flux",
 		DiffSource:  "QuantStack/FLUX.1-Krea-dev-GGUF",
 		DiffPattern: "flux1-krea-dev-{quant}.gguf",
@@ -90,7 +90,7 @@ var curated = []Model{
 		Description: "FLUX.1 Krea [dev] - photographic text-to-image.",
 	},
 	{
-		Name:        "flux.1-dev",
+		Name:        "flx-1-dev",
 		Arch:        "flux",
 		DiffSource:  "city96/FLUX.1-dev-gguf",
 		DiffPattern: "flux1-dev-{quant}.gguf",
@@ -99,7 +99,7 @@ var curated = []Model{
 		Description: "FLUX.1 [dev] - guidance-distilled text-to-image.",
 	},
 	{
-		Name:        "flux.1-schnell",
+		Name:        "flx-1-schnell",
 		Arch:        "flux",
 		DiffSource:  "city96/FLUX.1-schnell-gguf",
 		DiffPattern: "flux1-schnell-{quant}.gguf",
@@ -107,7 +107,7 @@ var curated = []Model{
 		Description: "FLUX.1 [schnell] - fast few-step text-to-image (Apache-2.0).",
 	},
 	{
-		Name:        "qwen-image-2.1",
+		Name:        "qwe-2.1",
 		Arch:        "qwen-image-2.1",
 		DiffSource:  "leejet/Qwen-Image-2.1-GGUF", // sd.cpp author's own conversion
 		DiffPattern: "qwen_image_2.1-{quant}.gguf",
@@ -119,7 +119,7 @@ var curated = []Model{
 		// Same architecture, refusal behaviour ablated by a third party. Pinned
 		// separately rather than as a quant of the base so `oflux ls` never
 		// hides which weights are installed.
-		Name:        "qwen-image-2.1-uncensored",
+		Name:        "qwe-2.1-uc",
 		Arch:        "qwen-image-2.1",
 		DiffSource:  "abenzerps/Qwen-Image-2.1-Uncensored-GGUF",
 		DiffPattern: "qwen-image-2.1-UC-{quant}.gguf",
@@ -138,7 +138,7 @@ var curated = []Model{
 		Description: "Qwen-Image 2.1, abliterated - as above with the refusal direction removed, paired with the matching abliterated text encoder. Third-party weights.",
 	},
 	{
-		Name:        "qwen-image",
+		Name:        "qwi-1",
 		Arch:        "qwen-image",
 		DiffSource:  "QuantStack/Qwen-Image-GGUF",
 		DiffPattern: "Qwen_Image-{quant}.gguf",

@@ -162,7 +162,7 @@ Flags:
 
 LoRAs are applied per request, not baked into a model — or name a combination
 once with ` + "`oflux preset add`" + ` and call the preset like any other model:
-  curl :11534/v1/edit -d '{"model":"qwen-image-edit","prompt":"...","image":"<b64>",
+  curl :11534/v1/edit -d '{"model":"qwe-2511","prompt":"...","image":"<b64>",
                            "loras":[{"name":"qwen-edit-lightning-4step"}],
                            "keep_alive":"10m"}'
 `
@@ -201,7 +201,7 @@ func cmdInstall(_ []string) error {
 	if target, onPath, err := selfinstall.LinkCLI(exe); err != nil {
 		fmt.Fprintln(os.Stderr, "note: couldn't link the oflux CLI onto your PATH:", err)
 	} else if onPath {
-		fmt.Printf("linked CLI: %s (try: oflux pull qwen-image-edit)\n", target)
+		fmt.Printf("linked CLI: %s (try: oflux pull qwe-2511)\n", target)
 	} else {
 		fmt.Printf("linked CLI: %s — add its directory to your PATH to use `oflux`\n", target)
 	}
@@ -302,7 +302,7 @@ func cmdList(_ []string) error {
 		return err
 	}
 	if len(models) == 0 {
-		fmt.Println("no models installed — try: oflux pull qwen-image-edit")
+		fmt.Println("no models installed — try: oflux pull qwe-2511")
 		return nil
 	}
 	rows := [][]string{{"NAME", "ARCH", "MODE", "LOADED", "LABEL"}}
@@ -504,7 +504,7 @@ func cmdPresetList() error {
 		return err
 	}
 	if len(presets) == 0 {
-		fmt.Println("no presets — try: oflux preset add fast --model qwen-image-edit --lora qwen-edit-lightning-4step --steps 4 --cfg 1")
+		fmt.Println("no presets — try: oflux preset add fast --model qwe-2511 --lora qwen-edit-lightning-4step --steps 4 --cfg 1")
 		return nil
 	}
 	rows := [][]string{{"NAME", "MODEL", "LORAS", "STEPS", "CFG", "LABEL"}}

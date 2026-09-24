@@ -54,6 +54,9 @@ dmg: app ## build dist/oflux-<version>.dmg
 sign: app ## sign the app locally (ad-hoc, or a cert if SIGN_IDENTITY is set)
 	./scripts/sign-app.sh
 
+deploy: ## interactive release: pick the version, test, build, notarize, publish, push docs
+	./scripts/deploy.sh
+
 release: ## cut + publish a release: sign, notarize, package, upload to GitHub
 	VERSION=$(VERSION) RELEASE_NAME="$(RELEASE_NAME)" ./scripts/release.sh $(ARGS)
 

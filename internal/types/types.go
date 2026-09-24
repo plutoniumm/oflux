@@ -77,7 +77,7 @@ type Manifest struct {
 	Components   []Component `json:"components"`
 	Engine       EngineSpec  `json:"engine"`
 
-	// Base is the checkpoint the friendly name hides: "qwen-image-edit" is
+	// Base is the checkpoint the friendly name hides: "qwe-2511" is
 	// Qwen-Image-Edit-2511, and nothing in the name says so. Revision is its
 	// release tag, when the publisher encodes one (2509 and 2511 are different
 	// models sharing an architecture).

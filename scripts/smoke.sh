@@ -60,26 +60,26 @@ json.dump({"model":model,"prompt":prompt,"image":b}, open(out,'w'))
 PY
 }
 
-# ---------- 1) z-image-turbo: generation ----------
-if pull z-image-turbo Q8_0; then
-  gen_json /v1/generate '{"model":"z-image-turbo","prompt":"a red fox sitting in a green forest, sharp photograph","steps":8}' "$OUT/fox.png" "z-image generate"
+# ---------- 1) zim-1-turbo: generation ----------
+if pull zim-1-turbo Q8_0; then
+  gen_json /v1/generate '{"model":"zim-1-turbo","prompt":"a red fox sitting in a green forest, sharp photograph","steps":8}' "$OUT/fox.png" "z-image generate"
 fi
 
-# ---------- 2) flux.1-kontext: edit ----------
-if pull flux.1-kontext Q4_K_M; then
+# ---------- 2) flx-1-kontext: edit ----------
+if pull flx-1-kontext Q4_K_M; then
   if [ -f "$OUT/fox.png" ]; then
-    edit_body flux.1-kontext "make it night time with a full moon" "$OUT/fox.png" "$OUT/_kontext.json"
+    edit_body flx-1-kontext "make it night time with a full moon" "$OUT/fox.png" "$OUT/_kontext.json"
     gen_json /v1/edit "@$OUT/_kontext.json" "$OUT/fox-night.png" "flux-kontext edit"
   else
     log "skip kontext edit: no input image"
   fi
 fi
 
-# ---------- 3) qwen-image-edit: edit ----------
-if pull qwen-image-edit Q4_K_M; then
+# ---------- 3) qwe-2511: edit ----------
+if pull qwe-2511 Q4_K_M; then
   if [ -f "$OUT/fox.png" ]; then
-    edit_body qwen-image-edit "add a small red hat on the fox" "$OUT/fox.png" "$OUT/_qwen.json"
-    gen_json /v1/edit "@$OUT/_qwen.json" "$OUT/fox-hat.png" "qwen-image-edit edit"
+    edit_body qwe-2511 "add a small red hat on the fox" "$OUT/fox.png" "$OUT/_qwen.json"
+    gen_json /v1/edit "@$OUT/_qwen.json" "$OUT/fox-hat.png" "qwe-2511 edit"
   else
     log "skip qwen edit: no input image"
   fi

@@ -1,0 +1,10 @@
+{
+  "name": "oflux-docs",
+  "private": true,
+  "description": "docsify site for oflux — see docs/. No bundler: build validates, deploy publishes to gh-pages.",
+  "scripts": {
+    "build": "./scripts/docs.sh build",
+    "deploy": "./scripts/docs.sh deploy",
+    "start": "npx --yes docsify-cli serve docs"
+  }
+}
