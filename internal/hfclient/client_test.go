@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -324,5 +325,74 @@ func TestParseNextLink(t *testing.T) {
 				t.Errorf("parseNextLink(%q) = %q, want %q", tt.header, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSearch(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		fmt.Fprint(w, `[
+			{"id":"org/small","downloads":10,"likes":1,"pipeline_tag":"text-to-image",
+				"gated":false,"lastModified":"2026-09-20T11:26:59.000Z"},
+			{"id":"org/big","downloads":900,"likes":7,"pipeline_tag":"image-to-image",
+				"gated":"manual","lastModified":"2026-01-02T03:04:05.000Z"}
+		]`)
+	}))
+	defer srv.Close()
+
+	hits, err := newTestClient("", srv.URL).Search(context.Background(), "flux gguf", 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got.Get("search") != "flux gguf" || got.Get("limit") != "5" {
+		t.Errorf("query = %v", got)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("got %d hits, want 2: %+v", len(hits), hits)
+	}
+	// Most-downloaded first, whatever order the Hub answered in.
+	if hits[0].ID != "org/big" || hits[1].ID != "org/small" {
+		t.Errorf("not ranked by downloads: %+v", hits)
+	}
+	// "gated" is false or one of "auto"/"manual" — a bool field would fail here.
+	if !hits[0].Gated || hits[1].Gated {
+		t.Errorf("gated decoded wrong: %+v", hits)
+	}
+	if hits[1].Likes != 1 || hits[1].PipelineTag != "text-to-image" || hits[1].Updated != "2026-09-20T11:26:59.000Z" {
+		t.Errorf("fields mapped wrong: %+v", hits[1])
+	}
+}
+
+func TestSearchUpstreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	if _, err := newTestClient("", srv.URL).Search(context.Background(), "x", 0); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
+// The live Hub omits "gated" (and "likes") from a model list unless they are
+// expanded, so a search that does not ask for them reports every repo as
+// ungated. Asserting on the URL rather than the response is the only way to
+// catch that: a fake Hub will happily return fields the real one never sends.
+func TestSearchRequestsTheFieldsItReads(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RawQuery
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	c := New("")
+	c.SetBaseURL(srv.URL)
+	if _, err := c.Search(context.Background(), "flux", 5); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"gated", "likes", "downloads", "lastModified"} {
+		if !strings.Contains(got, url.QueryEscape(field)) && !strings.Contains(got, field) {
+			t.Errorf("search query %q does not expand %q", got, field)
+		}
 	}
 }

@@ -12,6 +12,9 @@ import (
 // ErrPresetNotFound is returned when no preset with the requested name exists.
 var ErrPresetNotFound = errors.New("store: preset not found")
 
+// ErrPresetExists is returned when a rename would overwrite another preset.
+var ErrPresetExists = errors.New("store: preset already exists")
+
 // Preset is a saved bundle of request defaults at presets/<name>.json, callable
 // in place of a model name: a model plus the LoRA and the steps/cfg it needs,
 // named once instead of retyped — correctly — on every request.
@@ -98,6 +101,28 @@ func (s *Store) ListPresets() ([]Preset, error) {
 	}
 	slices.SortFunc(out, func(a, b Preset) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
+}
+
+// RenamePreset writes the preset under the new name and removes the old file.
+// The name inside the preset is rewritten too: it is what a response echoes,
+// and a stale one would name a preset that no longer exists.
+func (s *Store) RenamePreset(from, to string) error {
+	p, err := s.ReadPreset(from)
+	if err != nil {
+		return err
+	}
+	dst, err := s.presetPath(to)
+	if err != nil {
+		return err
+	}
+	if isFile(dst) {
+		return fmt.Errorf("%q: %w", to, ErrPresetExists)
+	}
+	p.Name = to
+	if err := s.WritePreset(p); err != nil {
+		return err
+	}
+	return s.RemovePreset(from)
 }
 
 func (s *Store) RemovePreset(name string) error {

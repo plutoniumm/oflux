@@ -111,7 +111,9 @@ func InspectFile(ctx context.Context, f RepoFetcher, repo string, quantPref []st
 		if !ok {
 			quant = "unknown"
 		}
-		return buildVerdict(ctx, f, repo, arch, files, chosen, quant)
+		v, err := buildVerdict(ctx, f, repo, arch, files, chosen, quant)
+		v.Quants = quantLabels(ggufFiles)
+		return v, err
 	}
 
 	chosen, quant, qok := selectQuant(ggufFiles, quantPrefs(quantPref))
@@ -132,7 +134,21 @@ func InspectFile(ctx context.Context, f RepoFetcher, repo string, quantPref []st
 		}), nil
 	}
 
-	return buildVerdict(ctx, f, repo, arch, files, chosen, quant)
+	v, err := buildVerdict(ctx, f, repo, arch, files, chosen, quant)
+	v.Quants = quantLabels(ggufFiles)
+	return v, err
+}
+
+// quantLabels are the distinct quantizations the repo publishes for its
+// diffusion weights, in tree order.
+func quantLabels(files []string) []string {
+	var out []string
+	for _, f := range files {
+		if q, ok := archdb.ParseQuant(f); ok && !slices.Contains(out, string(q)) {
+			out = append(out, string(q))
+		}
+	}
+	return out
 }
 
 // Blockers are what the CLI turns into the pull error, so a rejection must

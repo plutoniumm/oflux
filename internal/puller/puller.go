@@ -34,6 +34,11 @@ func New(hf *hfclient.Client, st *store.Store) *Puller {
 	return &Puller{hf: hf, store: st, inFlight: make(map[string]bool)}
 }
 
+// HF is the Hub client the puller was built with. Searching the Hub goes
+// through it rather than a second client, so one token — and one test base
+// URL — covers both.
+func (p *Puller) HF() *hfclient.Client { return p.hf }
+
 // claim refuses a second concurrent pull of the same model: two writers would
 // race over the same components.
 func (p *Puller) claim(name string) (release func(), err error) {

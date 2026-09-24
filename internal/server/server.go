@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,12 +52,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/images/edits", s.handleOpenAIEdit)
 	mux.HandleFunc("POST /v1/images/generations", s.handleOpenAIGenerate)
 	mux.HandleFunc("POST /api/pull", s.handlePull)
+	mux.HandleFunc("GET /api/search", s.handleSearch)
+	mux.HandleFunc("POST /api/inspect", s.handleInspect)
 	mux.HandleFunc("GET /api/tags", s.handleTags)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
 	mux.HandleFunc("GET /api/ps", s.handlePS)
 	mux.HandleFunc("GET /api/presets", s.handlePresets)
 	mux.HandleFunc("POST /api/presets/create", s.handlePresetCreate)
 	mux.HandleFunc("POST /api/presets/delete", s.handlePresetDelete)
+	mux.HandleFunc("POST /api/presets/rename", s.handlePresetRename)
 	mux.HandleFunc("GET /api/loras", s.handleLoras)
 	mux.HandleFunc("POST /api/loras/pull", s.handleLoraPull)
 	mux.HandleFunc("POST /api/loras/delete", s.handleLoraDelete)
@@ -346,6 +350,100 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	out.finish(m.Name, nil)
 }
 
+const (
+	defaultSearchLimit = 20
+	maxSearchLimit     = 50
+)
+
+// handleSearch finds a repo to pull. Ranking is by downloads alone: nothing
+// else in a search hit says whether a repo is worth installing.
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		fail(w, badRequest("q is required"))
+		return
+	}
+	limit := defaultSearchLimit
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = min(n, maxSearchLimit)
+	}
+	results, err := s.pull.HF().Search(r.Context(), q, limit)
+	if err != nil {
+		fail(w, coded(codeUpstreamFailed,
+			statusErr(http.StatusBadGateway, fmt.Errorf("hugging face search failed: %w", err))))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// InspectRequest is the body for POST /api/inspect.
+type InspectRequest struct {
+	Repo  string `json:"repo"`
+	Quant string `json:"quant,omitempty"`
+}
+
+// InspectComponent is one weight file a pull would fetch. The blob fields are
+// left out: nothing is downloaded, so there is no content address yet.
+type InspectComponent struct {
+	Role   types.Role `json:"role"`
+	Source string     `json:"source"`
+	File   string     `json:"file"`
+}
+
+// Quants, Components and Blockers are never null: a client renders them as
+// lists without checking.
+type InspectResponse struct {
+	Repo         string             `json:"repo"`
+	OK           bool               `json:"ok"`
+	Architecture string             `json:"architecture,omitempty"`
+	Mode         types.Mode         `json:"mode,omitempty"`
+	Quants       []string           `json:"quants"`
+	Components   []InspectComponent `json:"components"`
+	Blockers     []types.Blocker    `json:"blockers"`
+}
+
+// handleInspect answers "would a pull work?" without downloading anything.
+func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
+	var req InspectRequest
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("repo", req.Repo, nil); err != nil {
+		fail(w, err)
+		return
+	}
+	v, err := s.pull.Resolve(r.Context(), req.Repo, cmp.Or(req.Quant, s.cfg.DefaultQuant), "")
+	if err != nil {
+		// Unknown name, missing repo, unreadable tree: from here they are the
+		// same answer — there is nothing installable under that name.
+		fail(w, coded(codeModelNotFound, notFound("cannot inspect %q: %v", req.Repo, err)))
+		return
+	}
+	resp := InspectResponse{
+		Repo:       req.Repo,
+		OK:         len(v.Blockers) == 0,
+		Quants:     v.Quants,
+		Components: []InspectComponent{},
+		Blockers:   v.Blockers,
+	}
+	if resp.Quants == nil {
+		resp.Quants = []string{}
+	}
+	if resp.Blockers == nil {
+		resp.Blockers = []types.Blocker{}
+	}
+	if m := v.Manifest; m != nil {
+		resp.Architecture = m.Architecture
+		// archdb, not the manifest: see modelRow.
+		resp.Mode = archdb.ModeOf(m.Architecture, m.Mode)
+		for _, c := range m.Components {
+			resp.Components = append(resp.Components, InspectComponent{Role: c.Role, Source: c.Source, File: c.File})
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // ModelRow is one GET /api/tags entry; presets list here too, being callable.
 type ModelRow struct {
 	Name         string     `json:"name"`
@@ -620,6 +718,38 @@ func (s *Server) handlePresetDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+}
+
+// RenameRequest is the body for POST /api/presets/rename.
+type RenameRequest struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (s *Server) handlePresetRename(w http.ResponseWriter, r *http.Request) {
+	var req RenameRequest
+	if err := decodeJSON(r, &req); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("from", req.From, store.ValidName); err != nil {
+		fail(w, err)
+		return
+	}
+	if err := requireName("to", req.To, store.ValidName); err != nil {
+		fail(w, err)
+		return
+	}
+	switch err := s.store.RenamePreset(req.From, req.To); {
+	case errors.Is(err, store.ErrPresetNotFound):
+		fail(w, coded(codePresetNotFound, notFound("preset %q not found", req.From)))
+	case errors.Is(err, store.ErrPresetExists):
+		fail(w, statusErr(http.StatusConflict, err))
+	case err != nil:
+		fail(w, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"name": req.To})
+	}
 }
 
 func (s *Server) handlePS(w http.ResponseWriter, r *http.Request) {

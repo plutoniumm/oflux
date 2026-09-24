@@ -4,6 +4,7 @@
 package hfclient
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,8 +13,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,6 +120,61 @@ func (c *Client) treePage(ctx context.Context, url string) ([]treeEntry, string,
 		return nil, "", fmt.Errorf("hf: decode tree page: %w", err)
 	}
 	return entries, parseNextLink(resp.Header.Get("Link")), nil
+}
+
+// Search returns Hub models matching query, most-downloaded first. limit <= 0
+// leaves the Hub's own page size.
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]types.HFModel, error) {
+	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+
+	// expand[] REPLACES the default field set, so every field we read must be
+	// listed — including downloads and likes, which the bare endpoint returns
+	// but an expanded one does not. Without this the list endpoint omits
+	// "gated" entirely and every repo decodes as ungated, which only shows up
+	// as a failed download of a repo the user had to accept terms for.
+	// ("pipeline_tag" is requested but the Hub does not return it for model
+	// lists; the field stays empty rather than being faked.)
+	q := url.Values{
+		"search": {query}, "sort": {"downloads"}, "direction": {"-1"},
+		"expand[]": {"downloads", "likes", "gated", "lastModified", "pipeline_tag"},
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	resp, err := c.get(ctx, c.baseURL+"/api/models?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// "gated" is false or one of "auto"/"manual", so it cannot decode as a bool.
+	var hits []struct {
+		ID           string          `json:"id"`
+		Downloads    int             `json:"downloads"`
+		Likes        int             `json:"likes"`
+		PipelineTag  string          `json:"pipeline_tag"`
+		Gated        json.RawMessage `json:"gated"`
+		LastModified string          `json:"lastModified"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&hits); err != nil {
+		return nil, fmt.Errorf("hf: decode search: %w", err)
+	}
+	out := make([]types.HFModel, 0, len(hits))
+	for _, h := range hits {
+		g := string(h.Gated)
+		out = append(out, types.HFModel{
+			ID:          h.ID,
+			Downloads:   h.Downloads,
+			Likes:       h.Likes,
+			PipelineTag: h.PipelineTag,
+			Gated:       g != "" && g != "false" && g != "null",
+			Updated:     h.LastModified,
+		})
+	}
+	// The Hub honours sort=downloads, but that ranking is a wire contract here.
+	slices.SortStableFunc(out, func(a, b types.HFModel) int { return cmp.Compare(b.Downloads, a.Downloads) })
+	return out, nil
 }
 
 // ReadFile reads repo@revision/path, capped to maxBytes when that is positive.

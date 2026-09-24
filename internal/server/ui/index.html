@@ -301,6 +301,90 @@
   }
   .act:hover { background: var(--pelt); color: var(--shade); }
 
+  /* ---------- manage ---------- */
+
+  .tabs { display: flex; gap: 6px; margin-left: 14px; }
+  .tab {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 6px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: var(--muzzle);
+    color: var(--snout);
+    cursor: pointer;
+  }
+  .tab:hover { border-color: var(--pelt); }
+  .tab[aria-selected="true"] { background: var(--shade); border-color: var(--shade); color: var(--paper); }
+
+  .manage {
+    display: grid;
+    gap: 20px;
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 26px 22px 40px;
+  }
+  /* An empty note still takes a grid gap, which reads as a broken layout. */
+  .manage .note:empty { display: none; }
+  .card {
+    background: var(--muzzle);
+    border: 1px solid var(--rule);
+    border-radius: 14px;
+    padding: 16px 18px;
+  }
+  .card h2 { margin: 0 0 10px; font-size: 15px; font-weight: 750; letter-spacing: -.02em; }
+  .inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .inline input, .inline select { width: auto; flex: 1 1 170px; }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .row .name { font-family: var(--mono); font-size: 12.5px; }
+  .row .meta, .card .meta { font-family: var(--mono); font-size: 11px; color: var(--snout); }
+  .row .spacer { margin-left: auto; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .06em;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--pelt);
+    color: var(--shade);
+  }
+  .btn {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 6px 11px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--paper);
+    color: var(--snout);
+    cursor: pointer;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--pelt); color: var(--shade); }
+  .btn.go { background: var(--shade); border-color: var(--shade); color: var(--muzzle); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .log {
+    margin: 10px 0 0;
+    padding: 10px 12px;
+    max-height: 180px;
+    overflow: auto;
+    border-radius: 9px;
+    background: var(--shade);
+    color: rgba(242,231,213,.78);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    white-space: pre-wrap;
+  }
+  .log:empty { display: none; }
+
   @media (prefers-reduced-motion: reduce) {
     * { animation-duration: .001s !important; transition-duration: .001s !important; }
   }
@@ -322,10 +406,14 @@
     <path d="M46 60.5 L54 60.5 L50 66 Z" fill="#5A3316"/>
   </svg>
   <div class="wordmark">oflux</div>
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab" role="tab" data-view="create" aria-selected="true">Create</button>
+    <button type="button" class="tab" role="tab" data-view="manage" aria-selected="false">Manage</button>
+  </nav>
   <div class="status"><span class="dot off" id="dot"></span><span id="statusText">connecting</span></div>
 </header>
 
-<main class="bench">
+<main class="bench" id="createView">
   <form id="form" autocomplete="off">
     <div class="field">
       <label class="label" for="model">Model</label>
@@ -396,6 +484,57 @@
       <button type="button" class="act" id="seedAgain" hidden>Reuse seed</button>
       <button type="button" class="act" id="reuse">Use as input</button>
       <a class="act" id="save" download="oflux.png">Save</a>
+    </div>
+  </section>
+</main>
+
+<main class="manage" id="manageView" hidden>
+  <p class="note" id="manageNote"></p>
+
+  <section class="card">
+    <h2>Installed</h2>
+    <div id="installed"></div>
+  </section>
+
+  <section class="card">
+    <h2>Add a model</h2>
+    <div class="inline">
+      <input type="text" id="repo" placeholder="org/repo or a curated name" aria-label="Repository">
+      <select id="quant" aria-label="Quantization">
+        <option>Q8_0</option><option>Q6_K</option><option>Q5_K_M</option>
+        <option>Q4_K_M</option><option>Q4_0</option><option>F16</option>
+      </select>
+      <button type="button" class="btn" id="inspectBtn">Inspect</button>
+      <button type="button" class="btn go" id="pullBtn">Pull</button>
+    </div>
+    <div id="inspectOut"></div>
+    <div class="inline" style="margin-top:14px">
+      <input type="text" id="query" placeholder="Search Hugging Face" aria-label="Search Hugging Face">
+      <button type="button" class="btn" id="searchBtn">Search</button>
+    </div>
+    <div id="results"></div>
+    <pre class="log" id="pullLog"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Adapters</h2>
+    <div id="adapters"></div>
+    <pre class="log" id="loraLog"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Presets</h2>
+    <div id="presets"></div>
+    <div class="inline" style="margin-top:14px">
+      <input type="text" id="pName" placeholder="name" aria-label="Preset name">
+      <input type="text" id="pLabel" placeholder="label (optional)" aria-label="Preset label">
+      <select id="pModel" aria-label="Preset model"></select>
+    </div>
+    <div class="inline" style="margin-top:8px">
+      <select id="pLoras" multiple size="3" aria-label="Preset adapters"></select>
+      <input type="number" id="pSteps" placeholder="steps" aria-label="Preset steps">
+      <input type="number" id="pCfg" step="0.1" placeholder="cfg" aria-label="Preset CFG">
+      <button type="button" class="btn go" id="presetCreate">Create preset</button>
     </div>
   </section>
 </main>
@@ -531,9 +670,14 @@
       b.type = "button";
       b.className = "adapter";
       b.setAttribute("aria-pressed", String(picked.has(l.name)));
-      b.innerHTML = l.steps
-        ? `${l.name}<span class="steps">${l.steps} steps</span>`
-        : l.name;
+      // An adapter name comes off the wire, so it is text, never markup.
+      b.textContent = l.name;
+      if (l.steps) {
+        const s = document.createElement("span");
+        s.className = "steps";
+        s.textContent = l.steps + " steps";
+        b.appendChild(s);
+      }
       if (l.description) b.title = l.description;
       b.onclick = () => {
         picked.has(l.name) ? picked.delete(l.name) : picked.add(l.name);
@@ -694,6 +838,289 @@
       loadModels().catch(() => {});
     }
   });
+
+  // ---- manage ----------------------------------------------------------
+
+  const mg = {
+    note: $("manageNote"), installed: $("installed"),
+    repo: $("repo"), quant: $("quant"), inspectOut: $("inspectOut"),
+    query: $("query"), results: $("results"), pullLog: $("pullLog"),
+    adapters: $("adapters"), loraLog: $("loraLog"),
+    presets: $("presets"), pName: $("pName"), pLabel: $("pLabel"),
+    pModel: $("pModel"), pLoras: $("pLoras"), pSteps: $("pSteps"), pCfg: $("pCfg"),
+  };
+
+  // Every string rendered below is server data — a repo id someone else chose,
+  // a model name from `pull --as` — so it goes in as text and never as markup.
+  const node = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const row = (...kids) => { const r = node("div", "row"); r.append(...kids); return r; };
+  const spacer = () => node("span", "spacer");
+  const button = (label, onclick) => {
+    const b = node("button", "btn", label);
+    b.type = "button";
+    b.onclick = onclick;
+    return b;
+  };
+  const join = (...parts) => parts.filter(Boolean).join(" · ");
+
+  function mSay(msg, bad) {
+    mg.note.textContent = msg || "";
+    mg.note.classList.toggle("bad", !!bad);
+  }
+  const mFail = (e) => mSay(String(e.message || e), true);
+
+  async function unwrap(r) {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    return d;
+  }
+  const getJSON = async (url) => unwrap(await fetch(url));
+  const post = async (url, body) => unwrap(await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }));
+
+  // A pull runs for minutes, so its NDJSON body is read line by line and shown
+  // as it arrives; buffering the response would leave the page blank throughout.
+  async function streamPull(url, body, log) {
+    log.textContent = "";
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let ok = false, failed = "";
+    const take = (line) => {
+      if (!line.trim()) return;
+      let o;
+      try { o = JSON.parse(line); } catch { return; }
+      if (o.error) failed = o.error;
+      if (o.status === "success") ok = true;
+      log.appendChild(document.createTextNode((o.error || o.status || "") + "\n"));
+      log.scrollTop = log.scrollHeight;
+    };
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      buf += dec.decode(value, { stream: !done });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      lines.forEach(take);
+      if (done) { take(buf); break; }
+    }
+    if (!ok) throw new Error(failed || "pull did not finish");
+  }
+
+  function renderInstalled() {
+    // Presets ride along in /api/tags but are not installable weights, and
+    // /api/delete would not find them — they have their own section.
+    const rows = models.filter((x) => !x.preset);
+    mg.installed.replaceChildren();
+    if (!rows.length) { mg.installed.append(node("div", "meta", "Nothing installed yet.")); return; }
+    for (const x of rows) {
+      const r = row(
+        node("span", "dot" + (x.loaded ? "" : " off")),
+        node("span", "name", x.name),
+        node("span", "meta", join(x.architecture, x.mode)),
+      );
+      if (x.alpha) r.append(node("span", "chip", "RGBA"));
+      r.append(spacer(), button("Delete", async (e) => {
+        if (!confirm(`Delete ${x.name}? Its weights go too.`)) return;
+        e.target.disabled = true;
+        try { await post("/api/delete", { name: x.name }); mSay(`Deleted ${x.name}.`); await refreshManage(); }
+        catch (err) { mFail(err); e.target.disabled = false; }
+      }));
+      mg.installed.append(r);
+    }
+  }
+
+  async function search() {
+    const q = mg.query.value.trim();
+    if (!q) return;
+    mg.results.replaceChildren(node("div", "meta", "Searching…"));
+    let hits;
+    try { hits = (await getJSON("/api/search?q=" + encodeURIComponent(q))).results || []; }
+    catch (e) { mg.results.replaceChildren(); mFail(e); return; }
+    mSay("");
+    mg.results.replaceChildren();
+    if (!hits.length) { mg.results.append(node("div", "meta", "No matches.")); return; }
+    for (const h of hits) {
+      const r = row(
+        node("span", "name", h.id),
+        node("span", "meta", join(
+          h.downloads ? h.downloads.toLocaleString() + " downloads" : "",
+          h.likes ? h.likes + " likes" : "",
+          h.pipeline_tag,
+        )),
+      );
+      if (h.gated) r.append(node("span", "chip", "GATED"));
+      r.append(spacer(), button("Inspect", () => { mg.repo.value = h.id; inspect(); }));
+      mg.results.append(r);
+    }
+  }
+
+  async function inspect() {
+    const repo = mg.repo.value.trim();
+    if (!repo) { mSay("Name a repo first.", true); return; }
+    mg.inspectOut.replaceChildren(node("div", "meta", "Inspecting…"));
+    let d;
+    try { d = await post("/api/inspect", { repo, quant: mg.quant.value }); }
+    catch (e) { mg.inspectOut.replaceChildren(node("div", "meta", String(e.message || e))); return; }
+    mSay("");
+    mg.inspectOut.replaceChildren(row(
+      node("span", "name", d.repo || repo),
+      node("span", "meta", join(d.architecture, d.mode) || "unclassified"),
+      node("span", "chip", d.ok ? "RUNS" : "BLOCKED"),
+    ));
+    if (d.quants && d.quants.length) {
+      mg.inspectOut.append(row(node("span", "meta", "quants: " + d.quants.join(", "))));
+    }
+    for (const b of d.blockers || []) {
+      mg.inspectOut.append(row(node("span", "meta", join(b.kind, b.role, b.detail))));
+    }
+  }
+
+  async function pullModel(e) {
+    const name = mg.repo.value.trim();
+    if (!name) { mSay("Name a repo first.", true); return; }
+    e.target.disabled = true;
+    mSay("Pulling — a checkpoint is several gigabytes.");
+    try {
+      await streamPull("/api/pull", { name, quant: mg.quant.value }, mg.pullLog);
+      mSay(`Installed ${name}.`);
+      await refreshManage();
+    } catch (err) { mFail(err); }
+    finally { e.target.disabled = false; }
+  }
+
+  async function renderAdapters() {
+    let rows = [];
+    try { rows = (await getJSON("/api/loras")).loras || []; } catch (e) { mFail(e); }
+    mg.adapters.replaceChildren();
+    for (const l of rows) {
+      const r = row(
+        node("span", "name", l.name),
+        node("span", "meta", join(
+          l.steps ? l.steps + " steps" : "",
+          l.cfg ? "cfg " + l.cfg : "",
+          (l.archs || []).join(", "),
+        )),
+      );
+      if (l.description) r.title = l.description;
+      r.append(spacer(), button(l.installed ? "Delete" : "Pull", async (e) => {
+        e.target.disabled = true;
+        try {
+          if (l.installed) {
+            if (!confirm(`Delete adapter ${l.name}?`)) { e.target.disabled = false; return; }
+            await post("/api/loras/delete", { name: l.name });
+          } else {
+            await streamPull("/api/loras/pull", { name: l.name }, mg.loraLog);
+          }
+          mSay("");
+          await loadLoras();
+          syncLoras();
+          await renderAdapters();
+          renderPresetForm();
+        } catch (err) { mFail(err); e.target.disabled = false; }
+      }));
+      mg.adapters.append(r);
+    }
+  }
+
+  async function renderPresets() {
+    let rows = [];
+    try { rows = (await getJSON("/api/presets")).presets || []; } catch (e) { mFail(e); }
+    mg.presets.replaceChildren();
+    for (const p of rows) {
+      mg.presets.append(row(
+        node("span", "name", p.label ? `${p.name} — ${p.label}` : p.name),
+        node("span", "meta", join(
+          p.model,
+          p.steps ? p.steps + " steps" : "",
+          p.cfg ? "cfg " + p.cfg : "",
+          (p.loras || []).join(", "),
+        )),
+        spacer(),
+        button("Rename", async () => {
+          const to = (prompt(`New name for ${p.name}`, p.name) || "").trim();
+          if (!to || to === p.name) return;
+          try { await post("/api/presets/rename", { from: p.name, to }); await refreshManage(); }
+          catch (e) { mFail(e); }
+        }),
+        button("Delete", async () => {
+          if (!confirm(`Delete preset ${p.name}?`)) return;
+          try { await post("/api/presets/delete", { name: p.name }); await refreshManage(); }
+          catch (e) { mFail(e); }
+        }),
+      ));
+    }
+    renderPresetForm();
+  }
+
+  function renderPresetForm() {
+    const option = (name, selected) => {
+      const o = document.createElement("option");
+      o.value = name;
+      o.textContent = name;
+      o.selected = !!selected;
+      return o;
+    };
+    const keepModel = mg.pModel.value;
+    mg.pModel.replaceChildren(...models.filter((x) => !x.preset).map((x) => option(x.name)));
+    if (keepModel) mg.pModel.value = keepModel;
+    const kept = new Set([...mg.pLoras.selectedOptions].map((o) => o.value));
+    mg.pLoras.replaceChildren(...loras.map((l) => option(l.name, kept.has(l.name))));
+  }
+
+  $("presetCreate").addEventListener("click", async () => {
+    const body = { name: mg.pName.value.trim(), model: mg.pModel.value };
+    if (mg.pLabel.value.trim()) body.label = mg.pLabel.value.trim();
+    const picks = [...mg.pLoras.selectedOptions].map((o) => o.value);
+    if (picks.length) body.loras = picks;
+    if (mg.pSteps.value) body.steps = Number(mg.pSteps.value);
+    if (mg.pCfg.value) body.cfg = Number(mg.pCfg.value);
+    try {
+      const d = await post("/api/presets/create", body);
+      mSay(d.note || `Created ${body.name}.`);
+      mg.pName.value = "";
+      mg.pLabel.value = "";
+      await refreshManage();
+    } catch (e) { mFail(e); }
+  });
+
+  async function refreshManage() {
+    await loadModels().catch(() => {});
+    renderInstalled();
+    await renderAdapters();
+    await renderPresets();
+  }
+
+  const tabs = [...document.querySelectorAll(".tab")];
+  for (const t of tabs) {
+    t.addEventListener("click", () => {
+      for (const b of tabs) b.setAttribute("aria-selected", String(b === t));
+      $("createView").hidden = t.dataset.view !== "create";
+      $("manageView").hidden = t.dataset.view !== "manage";
+      if (t.dataset.view === "manage") refreshManage();
+    });
+  }
+
+  $("inspectBtn").addEventListener("click", inspect);
+  $("pullBtn").addEventListener("click", pullModel);
+  $("searchBtn").addEventListener("click", search);
+  const onEnter = (el, fn) => el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); fn(); }
+  });
+  onEnter(mg.query, search);
+  onEnter(mg.repo, inspect);
 
   loadLoras().then(loadModels);
 })();

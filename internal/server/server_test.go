@@ -2,11 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -103,7 +105,12 @@ func TestLoopbackHost(t *testing.T) {
 	}
 }
 
-func newTestServer(t *testing.T) (*Server, *store.Store) {
+func newTestServer(t *testing.T) (*Server, *store.Store) { return newTestServerHub(t, "") }
+
+// newTestServerHub points the one Hub client the server searches and resolves
+// through at a test server; "" leaves it aimed at the real Hub, unreachable in
+// a hermetic test but never contacted by the handlers that don't need it.
+func newTestServerHub(t *testing.T, hubURL string) (*Server, *store.Store) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -113,8 +120,11 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	// so an empty LogDir drops engine logs into the package directory whenever
 	// a test reaches a spawn.
 	sup := supervisor.New(supervisor.Options{LogDir: t.TempDir()})
-	pl := puller.New(hfclient.New(""), st)
-	return New(st, sup, pl, types.DefaultConfig()), st
+	hf := hfclient.New("")
+	if hubURL != "" {
+		hf.SetBaseURL(hubURL)
+	}
+	return New(st, sup, puller.New(hf, st), types.DefaultConfig()), st
 }
 
 func TestHandleImageModelNotInstalled(t *testing.T) {
@@ -295,5 +305,173 @@ func TestLorasRowsCarrySidecarMetadata(t *testing.T) {
 	// archs is the older spelling and still has to be there for old clients.
 	if len(row.Archs) != len(row.For) {
 		t.Errorf("archs = %v, want the same as for", row.Archs)
+	}
+}
+
+// fakeHub serves the two Hub endpoints these handlers use: model search, and a
+// repo tree listing built from bare filenames (inspect downloads nothing, so
+// no checksums are needed).
+func fakeHub(t *testing.T, repos map[string][]string, searchBody string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models" {
+			fmt.Fprint(w, searchBody)
+			return
+		}
+		repo := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/models/"), "/tree/main")
+		files, ok := repos[repo]
+		if !ok {
+			http.Error(w, "no repo", http.StatusNotFound)
+			return
+		}
+		var arr []map[string]any
+		for _, f := range files {
+			arr = append(arr, map[string]any{"type": "file", "oid": "git-" + f, "size": 1, "path": f})
+		}
+		json.NewEncoder(w).Encode(arr)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func doJSON(t *testing.T, srv *Server, method, target, body string) (int, map[string]any) {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, localReq(method, target, r))
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%s %s: body is not JSON: %s", method, target, rec.Body.String())
+	}
+	return rec.Code, out
+}
+
+func TestHandleSearch(t *testing.T) {
+	hub := fakeHub(t, nil, `[
+		{"id":"org/a","downloads":5,"likes":0,"pipeline_tag":"text-to-image","gated":false,"lastModified":"2026-09-20T11:26:59.000Z"},
+		{"id":"org/b","downloads":50,"likes":3,"pipeline_tag":"text-to-image","gated":"auto","lastModified":"2026-09-19T00:00:00.000Z"}
+	]`)
+	srv, _ := newTestServerHub(t, hub.URL)
+
+	code, body := doJSON(t, srv, http.MethodGet, "/api/search?q=flux&limit=2", "")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d: %v", code, body)
+	}
+	results, _ := body["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("results = %v", body["results"])
+	}
+	first, _ := results[0].(map[string]any)
+	if first["id"] != "org/b" || first["gated"] != true || first["downloads"] != 50.0 {
+		t.Errorf("first result = %v", first)
+	}
+
+	if code, body := doJSON(t, srv, http.MethodGet, "/api/search?q=", ""); code != http.StatusBadRequest || body["code"] != codeInvalidRequest {
+		t.Errorf("empty q = %d %v", code, body)
+	}
+}
+
+func TestHandleSearchUpstreamFailure(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer hub.Close()
+	srv, _ := newTestServerHub(t, hub.URL)
+
+	code, body := doJSON(t, srv, http.MethodGet, "/api/search?q=flux", "")
+	if code != http.StatusBadGateway || body["code"] != codeUpstreamFailed {
+		t.Errorf("upstream failure = %d %v, want 502 %s", code, body, codeUpstreamFailed)
+	}
+}
+
+func TestHandleInspect(t *testing.T) {
+	hub := fakeHub(t, map[string][]string{
+		"city96/FLUX.1-dev-gguf":            {"flux1-dev-Q8_0.gguf", "flux1-dev-Q4_K_M.gguf"},
+		"ffxvs/vae-flux":                    {"ae.safetensors"},
+		"comfyanonymous/flux_text_encoders": {"clip_l.safetensors"},
+		"city96/t5-v1_1-xxl-encoder-gguf":   {"t5-v1_1-xxl-encoder-Q8_0.gguf"},
+	}, "")
+	srv, _ := newTestServerHub(t, hub.URL)
+
+	code, body := doJSON(t, srv, http.MethodPost, "/api/inspect", `{"repo":"city96/FLUX.1-dev-gguf","quant":"Q8_0"}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d: %v", code, body)
+	}
+	if body["ok"] != true || body["architecture"] != "flux" || body["mode"] != "generate" {
+		t.Errorf("verdict = %v", body)
+	}
+	if got := body["quants"]; !reflect.DeepEqual(got, []any{"Q8_0", "Q4_K_M"}) {
+		t.Errorf("quants = %v", got)
+	}
+	// blockers must be [] rather than null: the UI renders it as a list.
+	if got, ok := body["blockers"].([]any); !ok || len(got) != 0 {
+		t.Errorf("blockers = %#v, want []", body["blockers"])
+	}
+	comps, _ := body["components"].([]any)
+	if len(comps) != 4 {
+		t.Fatalf("components = %v", body["components"])
+	}
+	first, _ := comps[0].(map[string]any)
+	if first["role"] != "diffusion" || first["file"] != "flux1-dev-Q8_0.gguf" || first["source"] != "city96/FLUX.1-dev-gguf" {
+		t.Errorf("diffusion component = %v", first)
+	}
+	// Nothing may have been downloaded.
+	if _, ok := first["blob"]; ok {
+		t.Errorf("inspect leaked a blob field: %v", first)
+	}
+}
+
+func TestHandleInspectBlockedAndUnknown(t *testing.T) {
+	hub := fakeHub(t, map[string][]string{
+		"someorg/mystery": {"model.safetensors"},
+	}, "")
+	srv, _ := newTestServerHub(t, hub.URL)
+
+	code, body := doJSON(t, srv, http.MethodPost, "/api/inspect", `{"repo":"someorg/mystery"}`)
+	if code != http.StatusOK {
+		t.Fatalf("an unrunnable repo is an answer, not an error: %d %v", code, body)
+	}
+	if body["ok"] != false {
+		t.Errorf("ok = %v, want false", body["ok"])
+	}
+	blockers, _ := body["blockers"].([]any)
+	if len(blockers) == 0 {
+		t.Fatalf("expected blockers: %v", body)
+	}
+
+	// An unreachable repo is a 404, never a 500.
+	code, body = doJSON(t, srv, http.MethodPost, "/api/inspect", `{"repo":"nobody/nothing"}`)
+	if code != http.StatusNotFound || body["code"] != codeModelNotFound {
+		t.Errorf("unknown repo = %d %v", code, body)
+	}
+}
+
+func TestHandlePresetRename(t *testing.T) {
+	srv, st := newTestServer(t)
+	st.WritePreset(store.Preset{Name: "old", Model: "m1"})
+	st.WritePreset(store.Preset{Name: "taken", Model: "m1"})
+
+	code, body := doJSON(t, srv, http.MethodPost, "/api/presets/rename", `{"from":"old","to":"new"}`)
+	if code != http.StatusOK || body["name"] != "new" {
+		t.Fatalf("rename = %d %v", code, body)
+	}
+	if p, err := st.ReadPreset("new"); err != nil || p.Model != "m1" {
+		t.Errorf("renamed preset = %+v, %v", p, err)
+	}
+
+	code, body = doJSON(t, srv, http.MethodPost, "/api/presets/rename", `{"from":"ghost","to":"x"}`)
+	if code != http.StatusNotFound || body["code"] != codePresetNotFound {
+		t.Errorf("missing source = %d %v", code, body)
+	}
+	code, body = doJSON(t, srv, http.MethodPost, "/api/presets/rename", `{"from":"new","to":"taken"}`)
+	if code != http.StatusConflict || body["code"] != codeInvalidRequest {
+		t.Errorf("name collision = %d %v", code, body)
+	}
+	code, body = doJSON(t, srv, http.MethodPost, "/api/presets/rename", `{"from":"new","to":"../escape"}`)
+	if code != http.StatusBadRequest {
+		t.Errorf("traversal name = %d %v", code, body)
 	}
 }

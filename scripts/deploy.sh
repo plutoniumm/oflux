@@ -64,8 +64,18 @@ say "pre-flight"
 command -v gh >/dev/null || die "gh CLI required"
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated — run: gh auth login"
 gh release view "$tag" >/dev/null 2>&1 && die "a GitHub release for $tag already exists (gh release delete $tag)"
-./scripts/notarize.sh --check
-echo "    notary credentials ok, $tag is free"
+# Credentials are only needed if we actually have to notarize. A previous run
+# may have left a stapled artifact for this exact version — reuse it rather than
+# demanding an unlocked keychain. (notarytool reports a locked login keychain as
+# "no password item found", indistinguishable from creds never being stored.)
+if [ -f "dist/oflux-$next.dmg" ] && xcrun stapler validate "dist/oflux-$next.dmg" >/dev/null 2>&1; then
+  echo "    dist/oflux-$next.dmg is already notarized — skipping the credential check"
+elif [ "$DRY" = 1 ]; then
+  ./scripts/notarize.sh --check || echo "    (dry run: notary credentials unavailable — a real run would stop here)"
+else
+  ./scripts/notarize.sh --check || die "notarization credentials unavailable. If they were working earlier, the login keychain has locked — unlock it (open Keychain Access, or log in again) and retry."
+fi
+echo "    $tag is free"
 
 say "releasing $cur -> $next as $tag ($RELEASE_NAME)"
 if [ "$DRY" != 1 ] && [ -z "${NEXT:-}" ]; then
@@ -87,9 +97,23 @@ else
   echo "    all green"
 fi
 
-# ---- stamp, commit, tag ------------------------------------------------------
+# ---- stamp and build BEFORE anything becomes public --------------------------
+# Order matters: notarization takes minutes and needs an unlocked keychain, so
+# it must fail while the tag is still local. Pushing first left v1.3.1 tagged
+# on the remote with no release attached.
 say "stamping VERSION"
 [ "$DRY" = 1 ] || echo "$next" > VERSION
+
+dmg="dist/oflux-$next.dmg"
+zip="dist/oflux-$next-macos-arm64.zip"
+if [ -f "$dmg" ] && [ -f "$zip" ] && xcrun stapler validate "$dmg" >/dev/null 2>&1; then
+  say "reusing already-notarized artifacts for $next"
+else
+  say "build + notarize (several minutes)"
+  run env VERSION="$next" RELEASE_NAME="$RELEASE_NAME" ./scripts/release.sh --no-publish
+fi
+
+say "committing and pushing"
 run git add -A
 if [ "$DRY" = 1 ] || ! git diff --cached --quiet; then
   run git commit -m "oflux $next"
@@ -100,9 +124,20 @@ run git tag -a "$tag" -m "$RELEASE_NAME"
 run git push origin "$branch"
 run git push origin "$tag"
 
-# ---- build, notarize, publish ------------------------------------------------
-say "build + notarize + publish (several minutes)"
-run env VERSION="$next" RELEASE_NAME="$RELEASE_NAME" ./scripts/release.sh
+say "publishing $tag"
+title="oflux $tag"
+[ -n "$RELEASE_NAME" ] && title="$title — $RELEASE_NAME"
+# NOTES_FILE, else RELEASE_NOTES.md if present, else the generic blurb. One
+# commit per release makes --generate-notes useless here.
+notes_file="${NOTES_FILE:-RELEASE_NOTES.md}"
+if [ -f "$notes_file" ]; then
+  say "using release notes from $notes_file"
+  run gh release create "$tag" "$dmg" "$zip" dist/SHA256SUMS --title "$title" --notes-file "$notes_file"
+  [ "$DRY" = 1 ] || rm -f "$notes_file"
+else
+  run gh release create "$tag" "$dmg" "$zip" dist/SHA256SUMS --title "$title" \
+    --notes "macOS (Apple Silicon) menu-bar build with the bundled Metal sd-server engine. Signed with a Developer ID and notarized by Apple, so it opens normally. Install: open the .dmg and drag oflux.app to Applications; the fox appears in your menu bar and models download on demand. Verify downloads against SHA256SUMS."
+fi
 
 say "docs -> gh-pages"
 run ./scripts/docs.sh deploy

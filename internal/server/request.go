@@ -34,6 +34,7 @@ const (
 	codeTooLarge       = "payload_too_large"
 	codeTimeout        = "timeout"
 	codeEngineFailed   = "engine_failed"
+	codeUpstreamFailed = "upstream_failed" // Hugging Face, not the engine
 	codeQueueFull      = "queue_full"
 	codeCancelled      = "cancelled"
 	codeUnsupported    = "unsupported"

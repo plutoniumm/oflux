@@ -87,3 +87,46 @@ func TestPresetNamesAreValidatedLikeModels(t *testing.T) {
 		t.Fatalf("ListPresets with a stray temp file = %+v, %v", got, err)
 	}
 }
+
+func TestRenamePreset(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.WritePreset(Preset{Name: "old", Model: "flux.1-dev", Label: "Old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WritePreset(Preset{Name: "taken", Model: "flux.1-dev"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RenamePreset("old", "new"); err != nil {
+		t.Fatalf("RenamePreset: %v", err)
+	}
+	if _, err := s.ReadPreset("old"); !errors.Is(err, ErrPresetNotFound) {
+		t.Errorf("old preset still readable: %v", err)
+	}
+	got, err := s.ReadPreset("new")
+	if err != nil {
+		t.Fatalf("ReadPreset: %v", err)
+	}
+	if got.Label != "Old" || got.Model != "flux.1-dev" {
+		t.Errorf("renamed preset lost fields: %+v", got)
+	}
+	// ReadPreset overwrites Name from the filename, so read the file itself:
+	// a stale name inside would name a preset that no longer exists.
+	var onDisk Preset
+	if _, err := readJSON(filepath.Join(s.PresetsDir(), "new.json"), &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Name != "new" {
+		t.Errorf("on-disk name = %q, want \"new\"", onDisk.Name)
+	}
+
+	if err := s.RenamePreset("ghost", "x"); !errors.Is(err, ErrPresetNotFound) {
+		t.Errorf("rename of a missing preset = %v", err)
+	}
+	if err := s.RenamePreset("new", "taken"); !errors.Is(err, ErrPresetExists) {
+		t.Errorf("rename onto an existing preset = %v", err)
+	}
+	if _, err := s.ReadPreset("new"); err != nil {
+		t.Errorf("a refused rename must leave the source alone: %v", err)
+	}
+}

@@ -141,6 +141,9 @@ type Verdict struct {
 	Manifest   *Manifest `json:"manifest,omitempty"` // populated when Compatible; components have Source+File but empty Blob until downloaded
 	Blockers   []Blocker `json:"blockers,omitempty"` // populated when not Compatible
 	Notes      []string  `json:"notes,omitempty"`    // non-fatal remarks (e.g. "gated repo, HF token required")
+	// Quants are the quantizations the repo publishes for its diffusion
+	// weights, so a caller can offer the choice without walking the tree again.
+	Quants []string `json:"quants,omitempty"`
 }
 
 // Config is the daemon configuration persisted at ~/.oflux/config.json.
@@ -169,4 +172,14 @@ func DefaultConfig() Config {
 		QueueDepth:    8,
 		DefaultQuant:  "Q8_0",
 	}
+}
+
+// HFModel is one hit from a Hugging Face model search.
+type HFModel struct {
+	ID          string `json:"id"`
+	Downloads   int    `json:"downloads"`
+	Likes       int    `json:"likes"`
+	PipelineTag string `json:"pipeline_tag"`
+	Gated       bool   `json:"gated"`
+	Updated     string `json:"updated"`
 }
