@@ -23,6 +23,8 @@ oflux pull qwen-image-edit
 
 | Name | Does | Architecture | Pulled from | What it is |
 |------|------|--------------|-------------|------------|
+| `qwen-image-2.1` | **both** | `qwen-image-2.1` | `leejet/Qwen-Image-2.1-GGUF` | Qwen-Image 2.1 — unified text-to-image and editing, up to 10 reference images, native RGBA (Qwen3-VL-8B encoder). Non-commercial licence. |
+| `qwen-image-2.1-uncensored` | **both** | `qwen-image-2.1` | `abenzerps/Qwen-Image-2.1-Uncensored-GGUF` | Qwen-Image 2.1, abliterated — as above with the refusal direction removed. Third-party weights. |
 | `qwen-image-edit` | **both** | `qwen-image-edit` | `unsloth/Qwen-Image-Edit-2511-GGUF` | Qwen-Image-Edit 2511 — instruction image editing (Qwen2.5-VL encoder). |
 | `flux.1-kontext` | edit | `flux-kontext` | `QuantStack/FLUX.1-Kontext-dev-GGUF` | FLUX.1 Kontext [dev] — in-context image editing. |
 | `flux.2-klein` | **both** | `flux2-klein` | `leejet/FLUX.2-klein-4B-GGUF` | FLUX.2 klein 4B — few-step text-to-image and editing (Qwen3-4B encoder). |
@@ -60,6 +62,12 @@ them from their own pinned repos and caches them once:
 | `flux2-klein` — 4B | VAE `Comfy-Org/vae-text-encorder-for-flux-klein-4b` · LLM encoder `unsloth/Qwen3-4B-GGUF` (quantized) |
 | `flux2-klein` — 9B | VAE `Comfy-Org/vae-text-encorder-for-flux-klein-9b` · LLM encoder `unsloth/Qwen3-8B-GGUF` (quantized) |
 | `qwen-image`, `qwen-image-edit` | VAE `Comfy-Org/Qwen-Image_ComfyUI` · LLM encoder `mradermacher/Qwen2.5-VL-7B-Instruct-GGUF` (quantized) |
+| `qwen-image-2.1` | VAE `Comfy-Org/Qwen-Image-2.1` · LLM encoder + vision tower `Qwen/Qwen3-VL-8B-Instruct-GGUF` (quantized) |
+
+`qwen-image-2.1-uncensored` overrides the encoder with the matching abliterated
+build, `pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF` — the prompt is read
+by Qwen3-VL, so ablating only the diffusion weights does half the job.
+
 | `z-image` | VAE `ffxvs/vae-flux` · LLM encoder `unsloth/Qwen3-4B-Instruct-2507-GGUF` (quantized) |
 
 Pull a second FLUX model and only its diffusion weights are new — the VAE and
@@ -88,6 +96,8 @@ These are the labels each diffusion repo really ships, best first:
 
 | Model | Quant labels |
 |-------|--------------|
+| `qwen-image-2.1` | `Q8_0` `Q6_K` `Q5_0` `Q4_K` `Q4_0` `Q3_K` `Q2_K` |
+| `qwen-image-2.1-uncensored` | `BF16` `Q8_0` `Q6_K` `Q5_K_M` `Q4_K_M` `Q4_0` |
 | `qwen-image-edit` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_L` `Q3_K_M` `Q3_K_S` `Q2_K` |
 | `flux.1-kontext` | `Q8_0` `Q6_K` `Q5_K_M` `Q5_K_S` `Q5_1` `Q5_0` `Q4_K_M` `Q4_K_S` `Q4_1` `Q4_0` `Q3_K_M` `Q3_K_S` `Q2_K` |
 | `flux.2-klein` | `Q8_0` `Q4_0` |
@@ -128,6 +138,7 @@ oflux lora pull qwen-edit-lightning-4step
 
 | Name | Applies to | Steps | CFG | What it is |
 |------|-----------|-------|-----|------------|
+| `qwen-2.1-turbo-6step` | `qwen-image-2.1` | 6 | 1.0 | 6-step distillation for Qwen-Image 2.1 (~5.6x faster). Preview quality; sd.cpp binds 326 of its 454 tensors. |
 | `qwen-edit-lightning-4step` | `qwen-image-edit` | 4 | 1.0 | 4-step distillation for Qwen-Image-Edit 2511 (~5x faster edits). |
 | `qwen-edit-lightning-8step` | `qwen-image-edit` | 8 | 1.0 | 8-step distillation for Qwen-Image-Edit 2511 (better fidelity than 4-step). |
 | `qwen-image-lightning-4step` | `qwen-image` | 4 | 1.0 | 4-step distillation for Qwen-Image text-to-image. |

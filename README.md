@@ -54,8 +54,27 @@ curl localhost:11534/v1/edit -d '{
 Optional fields: `loras[]`, `ref_images[]`, `mask` (white = edit),
 `mask_prompt` (name what to change and SAM3 masks it for you),
 `control_image` + `control_strength`, `negative_prompt`, `strength`, `steps`,
-`seed`, `cfg`, `sampler`, `scheduler`, `keep_alive`, `stream`,
+`seed`, `cfg`, `sampler`, `scheduler`, `transparent`, `keep_alive`, `stream`,
 `guidance{txt_cfg,img_cfg,distilled_guidance,slg}`.
+
+`transparent: true` asks for an RGBA result on a model whose weights can produce
+one — today that is `qwen-image-2.1`, which `/api/tags` marks with `"alpha":
+true`. There is no engine switch for it: the model decides from the wording of
+the prompt, so oflux supplies the phrasing Qwen prescribes. Asking a model that
+cannot is a 400 rather than a silently opaque image.
+
+**Known upstream bug:** on Metal the subject decodes correctly but much of the
+background comes back opaque white instead of transparent, so the cut-out needs
+cleaning up by hand. That is [stable-diffusion.cpp#2024][sd2024], not something
+oflux can fix from here — raising steps does not help. The alpha channel itself
+is real, so a cleanup pass on the result works.
+
+[sd2024]: https://github.com/leejet/stable-diffusion.cpp/issues/2024
+
+An edit returns the same size it was given: with no `width`/`height`, the canvas
+follows the input image (rounded to a multiple of 64, capped at 2048). Pass them
+explicitly to override — a smaller canvas is much faster, since sampling cost
+scales with the pixel count.
 
 `keep_alive` overrides the idle unload for that model — `"10m"` to hold it, `-1`
 to pin it resident. Chained edits otherwise pay a full reload between turns.
@@ -128,6 +147,7 @@ curl localhost:11534/v1/edit -d '{
 
 | Name | For | Steps |
 |------|-----|-------|
+| `qwen-2.1-turbo-6step` | `qwen-image-2.1` | 6 |
 | `qwen-edit-lightning-4step` / `-8step` | `qwen-image-edit` | 4 / 8 |
 | `qwen-image-lightning-4step` | `qwen-image` | 4 |
 | `flux-turbo-8step`, `flux-hyper-8step` | `flux.1-dev`, `flux.1-krea` | 8 |
@@ -156,6 +176,8 @@ only — none of the curated models above support it.
 
 | Name | Task |
 |------|------|
+| `qwen-image-2.1` | **both** — newest; 10 reference images, transparent output |
+| `qwen-image-2.1-uncensored` | **both** — the same weights, abliterated |
 | `qwen-image-edit` | **both** — best instruction following |
 | `flux.2-klein` | **both** — 4-step, fast |
 | `flux.2-klein-9b` | **both** — the larger klein |

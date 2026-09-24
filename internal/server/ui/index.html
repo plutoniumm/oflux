@@ -362,6 +362,11 @@
         <label class="label" for="negative">Avoid</label>
         <input type="text" id="negative" placeholder="blurry, low quality">
       </div>
+      <div class="field" id="alphaField" hidden>
+        <label class="label" for="transparent">
+          <input type="checkbox" id="transparent"> Transparent background
+        </label>
+      </div>
       <div class="field pair">
         <div>
           <label class="label" for="steps">Steps</label>
@@ -405,6 +410,7 @@
     form: $("form"), drop: $("drop"), file: $("file"), clear: $("clear"),
     imageField: $("imageField"), imageLabel: $("imageLabel"),
     maskField: $("maskField"), maskPrompt: $("maskPrompt"),
+    alphaField: $("alphaField"), transparent: $("transparent"),
     plate: $("plate"), empty: $("empty"),
     readout: $("readout"), meta: $("meta"), save: $("save"), reuse: $("reuse"),
     seedAgain: $("seedAgain"),
@@ -482,6 +488,9 @@
     els.imageField.hidden = !canEdit();
     // Naming a region only means anything once there is an image to find it in.
     els.maskField.hidden = !edit;
+    // Transparency is a property of the weights, not a request option.
+    els.alphaField.hidden = !currentModel()?.alpha;
+    if (els.alphaField.hidden) els.transparent.checked = false;
     els.imageLabel.textContent = hybrid ? "Image to edit (optional)" : "Image to edit";
     els.run.textContent = edit ? "Edit image" : "Generate image";
     els.prompt.placeholder = edit
@@ -623,6 +632,7 @@
     if (isEdit()) body.image = inputs.length > 1 ? inputs : inputs[0];
     if (isEdit() && els.maskPrompt.value.trim()) body.mask_prompt = els.maskPrompt.value.trim();
     if (els.negative.value.trim()) body.negative_prompt = els.negative.value.trim();
+    if (els.transparent.checked) body.transparent = true;
     if (els.steps.value) body.steps = Number(els.steps.value);
     if (els.seed.value) body.seed = Number(els.seed.value);
     if (picked.size) body.loras = [...picked].map((name) => ({ name }));

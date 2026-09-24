@@ -42,6 +42,13 @@ if [ -f "$OUT/gen.png" ]; then
   if [ "$c" = 200 ]; then
     python3 -c "import json,base64;d=json.load(open('$OUT/edit.json'));open('$OUT/edit.png','wb').write(base64.b64decode(d['images'][0]))"
     ispng "$OUT/edit.png" && ok "edit -> valid PNG ($(du -h "$OUT/edit.png"|cut -f1))" || no "edit: not a PNG"
+    # The engine's own canvas is 512x512 and it never measures the reference,
+    # so an edit that names no size used to silently return a thumbnail.
+    python3 -c "
+import struct,sys
+d=lambda p: struct.unpack('>II', open(p,'rb').read()[16:24])
+sys.exit(0 if d('$OUT/gen.png')==d('$OUT/edit.png') else 1)" \
+      && ok "edit keeps the input's dimensions" || no "edit resized the image"
   else no "edit HTTP $c: $(head -c200 "$OUT/edit.json")"; fi
 else no "edit skipped (no input image)"; fi
 

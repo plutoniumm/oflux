@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -513,6 +514,12 @@ func (s *Server) validate(req *ImageRequest, mode types.Mode) (types.Manifest, e
 		}
 	}
 
+	// Alpha is a property of the weights, not a switch, so a model that lacks
+	// it would silently return an opaque image and look like it worked.
+	if req.Transparent && !archdb.SupportsAlpha(m.Architecture) {
+		return m, badRequest("model %q cannot emit transparency — install one that can: oflux pull qwen-image-2.1", m.Name)
+	}
+
 	// Before spawning an engine: a missing adapter would otherwise surface as an
 	// opaque failure several minutes into a model load.
 	for _, l := range req.Loras {
@@ -564,7 +571,58 @@ func (s *Server) validate(req *ImageRequest, mode types.Mode) (types.Manifest, e
 		}
 		req.RefImages[i] = v
 	}
+
+	// sd-server's canvas defaults to 512x512 and it never infers one from the
+	// reference image, so an edit that named no size came back downscaled —
+	// silently, however large the input was. Every edit through the web UI was
+	// a 512x512 thumbnail of itself. Match the subject instead.
+	if mode == types.ModeEdit && req.Width == nil && req.Height == nil {
+		src := req.Image.First()
+		if src == "" && len(req.RefImages) > 0 {
+			src = req.RefImages[0]
+		}
+		if w, h, ok := canvasFor(src); ok {
+			req.Width, req.Height = &w, &h
+		}
+	}
 	return m, nil
+}
+
+// editCanvasMax caps the canvas an input image can ask for on its own. Cost
+// grows with the pixel count, so an unclamped phone photograph would quietly
+// commission an hour of sampling; 2048 is the largest any curated model claims
+// to render natively. An explicit width/height is still honoured up to
+// maxDimension — this ceiling only applies to the size we infer.
+// ponytail: fixed ceiling, make it per-arch if a model lands that wants more.
+const editCanvasMax = 2048
+
+// canvasFor reads a base64 image's header and returns the nearest canvas the
+// engine will accept: a multiple of 64, which every supported architecture's
+// patch size divides. ok=false when there is nothing decodable to measure, and
+// the caller then leaves the engine on its own default.
+func canvasFor(b64 string) (w, h int, ok bool) {
+	if b64 == "" {
+		return 0, 0, false
+	}
+	raw, err := decodeB64(b64)
+	if err != nil {
+		return 0, 0, false
+	}
+	// Header only: the pixels are never allocated just to measure them.
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, 0, false
+	}
+	w, h = cfg.Width, cfg.Height
+	if longest := max(w, h); longest > editCanvasMax {
+		w = w * editCanvasMax / longest // aspect first, rounding second
+		h = h * editCanvasMax / longest
+	}
+	return roundCanvas(w), roundCanvas(h), true
+}
+
+func roundCanvas(v int) int {
+	return min(max((v+32)/64*64, minDimension), editCanvasMax)
 }
 
 func imageField(i, n int) string {

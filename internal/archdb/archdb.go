@@ -75,6 +75,11 @@ type Arch struct {
 	// Sampling defaults surfaced to the user / used when the request omits them.
 	Defaults map[string]any
 
+	// Alpha marks an architecture that can emit a transparent (RGBA) image.
+	// Nothing in the engine switches it on: the model decides from the prompt,
+	// so the server prepends the wording upstream prescribes. See AlphaPrompt.
+	Alpha bool
+
 	// DiffFlag overrides the flag that loads the diffusion role. Empty means
 	// "--diffusion-model", right for standalone DiT weights. Full-checkpoint
 	// arches (SD/SDXL) bake UNet+VAE+encoders into one file loaded with
@@ -246,6 +251,17 @@ var (
 		Source: "mradermacher/Qwen2.5-VL-7B-Instruct-GGUF", FilePattern: "Qwen2.5-VL-7B-Instruct.{quant}.gguf", Quantized: true,
 		Quants: []Quant{"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
 	}
+
+	// Qwen-Image 2.1 ships a NEW 64-channel RGBA autoencoder. docs/qwen_image_2.1.md
+	// is explicit that the earlier Qwen-Image and Wan 2.2 VAEs are not
+	// interchangeable with it, so this must not collapse into qwenImageVAE.
+	qwenImage21VAE = Companion{Source: "Comfy-Org/Qwen-Image-2.1", FilePattern: "vae/qwen_image_2.1_vae_bf16.safetensors"}
+	// Qwen publishes only these three GGUF builds of the 2.1 text encoder; F16
+	// is spelled upper-case here, unlike city96's t5, so it is listable.
+	qwen3VL8B = Companion{
+		Source: "Qwen/Qwen3-VL-8B-Instruct-GGUF", FilePattern: "Qwen3VL-8B-Instruct-{quant}.gguf", Quantized: true,
+		Quants: []Quant{"F16", "Q8_0", "Q4_K_M"},
+	}
 )
 
 // registry is the supported-architecture table.
@@ -369,6 +385,37 @@ var registry = []Arch{
 		Defaults:    map[string]any{"cfg_scale": 2.5, "flow_shift": 3, "steps": 20, "sample_method": "euler"},
 	},
 	{
+		// Qwen-Image 2.1: one 7B DiT that generates and edits, reading prompts
+		// and reference images through Qwen3-VL-8B. Ground truth:
+		// docs/qwen_image_2.1.md. Three things differ from qwen-image-edit and
+		// all three break silently if copied from it: a different VAE, a
+		// different encoder family, and mmproj being mandatory to edit at all.
+		Name:       "qwen-image-2.1",
+		ClassNames: []string{"QwenImage21Pipeline", "QwenImage21Transformer2DModel"},
+		Keywords:   []string{"qwen-image-2.1", "qwen_image_2.1", "qwen-image2.1"},
+		Mode:       types.ModeBoth,
+		Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
+		// Unlike 2511, the vision tower is NOT optional polish: with a GGUF
+		// encoder the engine cannot read a reference image without --llm_vision,
+		// so an edit-capable model would only ever generate. Optional here means
+		// "not needed to launch", and it always resolves.
+		Optional: []types.Role{types.RoleMMProj},
+		Companions: map[types.Role]Companion{
+			types.RoleVAE: qwenImage21VAE,
+			types.RoleLLM: qwen3VL8B,
+			types.RoleMMProj: {
+				Source: qwen3VL8B.Source, FilePattern: "mmproj-Qwen3VL-8B-Instruct-{quant}.gguf", Quantized: true,
+				Quants: []Quant{"F16", "Q8_0"},
+			},
+		},
+		Alpha: true,
+		// No flow_shift: 2.1 picks its flow schedule from the resolution itself,
+		// and pinning one here would override that. 40 steps and cfg 6.0 are the
+		// upstream defaults (QwenLM README, docs/qwen_image_2.1.md).
+		switchFlags: []string{"--diffusion-fa"},
+		Defaults:    map[string]any{"cfg_scale": 6.0, "steps": 40, "sample_method": "euler"},
+	},
+	{
 		Name:       "z-image",
 		ClassNames: []string{"ZImagePipeline"},
 		Keywords:   []string{"z-image", "z_image"},
@@ -433,7 +480,7 @@ func find(match func(Arch) bool) (Arch, bool) {
 
 // keywordPriority orders matching specific before generic, so "FLUX.2" never
 // falls through to FLUX.1. An arch missing here is never keyword-matched.
-var keywordPriority = []string{"flux-kontext", "flux2-klein", "flux2", "qwen-image-edit", "qwen-image", "z-image", "chroma", "flux", "sdxl"}
+var keywordPriority = []string{"flux-kontext", "flux2-klein", "flux2", "qwen-image-2.1", "qwen-image-edit", "qwen-image", "z-image", "chroma", "flux", "sdxl"}
 
 // MatchKeyword returns the architecture whose Keywords appear in the given
 // haystack (a repo id or filename), most specific first. Used as a fallback
@@ -445,6 +492,18 @@ func MatchKeyword(haystack string) (Arch, bool) {
 		}
 	}
 	return Arch{}, false
+}
+
+// AlphaPrompt is the wording Qwen prescribes for transparent output, with %s
+// the user's own description. Transparency is not a flag anywhere in the stack:
+// the model infers it from the prompt, so this exact framing is the switch.
+// Source: QwenLM/Qwen-Image-2.1 README, echoed by docs/qwen_image_2.1.md.
+const AlphaPrompt = "This is an RGBA image with transparency. %s The image has alpha channel and the background is transparent."
+
+// SupportsAlpha reports whether arch can emit transparency.
+func SupportsAlpha(arch string) bool {
+	a, ok := ByName(arch)
+	return ok && a.Alpha
 }
 
 // ModeOf returns the mode archdb currently believes arch supports, falling back

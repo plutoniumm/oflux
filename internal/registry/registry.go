@@ -107,6 +107,37 @@ var curated = []Model{
 		Description: "FLUX.1 [schnell] - fast few-step text-to-image (Apache-2.0).",
 	},
 	{
+		Name:        "qwen-image-2.1",
+		Arch:        "qwen-image-2.1",
+		DiffSource:  "leejet/Qwen-Image-2.1-GGUF", // sd.cpp author's own conversion
+		DiffPattern: "qwen_image_2.1-{quant}.gguf",
+		// leejet spells the K-quants bare: Q4_K and Q3_K, no _M/_S variants.
+		Quants:      []archdb.Quant{"Q8_0", "Q6_K", "Q5_0", "Q4_K", "Q4_0", "Q3_K", "Q2_K"},
+		Description: "Qwen-Image 2.1 - unified text-to-image and editing, up to 10 reference images, native RGBA (Qwen3-VL-8B encoder). Non-commercial license.",
+	},
+	{
+		// Same architecture, refusal behaviour ablated by a third party. Pinned
+		// separately rather than as a quant of the base so `oflux ls` never
+		// hides which weights are installed.
+		Name:        "qwen-image-2.1-uncensored",
+		Arch:        "qwen-image-2.1",
+		DiffSource:  "abenzerps/Qwen-Image-2.1-Uncensored-GGUF",
+		DiffPattern: "qwen-image-2.1-UC-{quant}.gguf",
+		Quants:      []archdb.Quant{"BF16", "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_0"},
+		// Ablating the diffusion weights alone leaves half the job undone: the
+		// prompt is read by Qwen3-VL, so refusal behaviour lives in the encoder
+		// too. This pairs the uncensored transformer with the matching
+		// abliterated encoder and its vision tower.
+		Overrides: map[types.Role]archdb.Companion{
+			types.RoleLLM: {
+				Source: "pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF", FilePattern: "qwen3vl_8b_heretic-{quant}.gguf", Quantized: true,
+				Quants: []archdb.Quant{"Q8_0", "Q6_K", "Q4_K_M"},
+			},
+			types.RoleMMProj: {Source: "pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF", FilePattern: "mmproj-qwen3vl_8b_heretic-f16.gguf"},
+		},
+		Description: "Qwen-Image 2.1, abliterated - as above with the refusal direction removed, paired with the matching abliterated text encoder. Third-party weights.",
+	},
+	{
 		Name:        "qwen-image",
 		Arch:        "qwen-image",
 		DiffSource:  "QuantStack/Qwen-Image-GGUF",

@@ -1,9 +1,13 @@
 package server
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -527,5 +531,103 @@ func TestPresetEndpoints(t *testing.T) {
 		if rec := postJSON(t, srv, "/api/presets/create", bad); rec.Code != http.StatusBadRequest {
 			t.Errorf("create %v = %d, want 400", bad, rec.Code)
 		}
+	}
+}
+
+// Transparency has no engine flag: 2.1 reads it out of the prompt, so the edge
+// supplies the wording upstream prescribes. A model without RGBA weights would
+// otherwise return an ordinary opaque image and look like it had worked.
+func TestTransparentWrapsPromptAndRejectsModelsWithoutAlpha(t *testing.T) {
+	srv, st := newTestServer(t)
+	for _, m := range []types.Manifest{
+		{Name: "q21", Architecture: "qwen-image-2.1", Mode: types.ModeBoth},
+		{Name: "f1", Architecture: "flux", Mode: types.ModeGenerate},
+	} {
+		if err := st.WriteManifest(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := ImageRequest{Model: "q21", Prompt: "a dragon sticker", Transparent: true}
+	m, err := srv.validate(&req, types.ModeGenerate)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	got := buildImgGen(m, req, types.ModeGenerate).Prompt
+	want := "This is an RGBA image with transparency. a dragon sticker. The image has alpha channel and the background is transparent."
+	if got != want {
+		t.Errorf("prompt = %q, want %q", got, want)
+	}
+	// An author who already punctuated must not get two full stops.
+	req.Prompt = "a dragon sticker."
+	if got := buildImgGen(m, req, types.ModeGenerate).Prompt; got != want {
+		t.Errorf("prompt = %q, want %q", got, want)
+	}
+	// Off by default, the prompt is untouched.
+	plain := ImageRequest{Model: "q21", Prompt: "a dragon sticker"}
+	if got := buildImgGen(m, plain, types.ModeGenerate).Prompt; got != "a dragon sticker" {
+		t.Errorf("prompt = %q, want it verbatim", got)
+	}
+
+	bad := ImageRequest{Model: "f1", Prompt: "p", Transparent: true}
+	if _, err := srv.validate(&bad, types.ModeGenerate); err == nil {
+		t.Fatal("transparent on a model without alpha should be a 400")
+	}
+}
+
+// The engine's own canvas default is 512x512 and it never looks at the
+// reference image, so an edit that named no size used to come back as a
+// downscaled thumbnail of whatever went in — through the web UI, always.
+func TestEditCanvasFollowsTheInputImage(t *testing.T) {
+	srv, st := newTestServer(t)
+	if err := st.WriteManifest(types.Manifest{Name: "e1", Architecture: "qwen-image-edit", Mode: types.ModeEdit}); err != nil {
+		t.Fatal(err)
+	}
+	pngOf := func(w, h int) string {
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, w, h))); err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(buf.Bytes())
+	}
+
+	for _, tc := range []struct{ inW, inH, wantW, wantH int }{
+		{1024, 1024, 1024, 1024},
+		{768, 512, 768, 512},
+		{1000, 600, 1024, 576},   // snapped to the nearest multiple of 64
+		{6000, 3000, 2048, 1024}, // clamped to editCanvasMax, aspect kept
+	} {
+		req := ImageRequest{Model: "e1", Prompt: "p", Image: ImageInput{pngOf(tc.inW, tc.inH)}}
+		if _, err := srv.validate(&req, types.ModeEdit); err != nil {
+			t.Fatalf("%dx%d: validate: %v", tc.inW, tc.inH, err)
+		}
+		if req.Width == nil || req.Height == nil {
+			t.Fatalf("%dx%d: canvas not inferred", tc.inW, tc.inH)
+		}
+		if *req.Width != tc.wantW || *req.Height != tc.wantH {
+			t.Errorf("%dx%d -> %dx%d, want %dx%d", tc.inW, tc.inH, *req.Width, *req.Height, tc.wantW, tc.wantH)
+		}
+	}
+
+	// An explicit size is the caller's business and must survive untouched.
+	w, h := 640, 480
+	req := ImageRequest{Model: "e1", Prompt: "p", Image: ImageInput{pngOf(2048, 2048)}, Width: &w, Height: &h}
+	if _, err := srv.validate(&req, types.ModeEdit); err != nil {
+		t.Fatal(err)
+	}
+	if *req.Width != 640 || *req.Height != 480 {
+		t.Errorf("explicit size overwritten: %dx%d", *req.Width, *req.Height)
+	}
+
+	// Generate has no subject to measure: the model's own default canvas stands.
+	if err := st.WriteManifest(types.Manifest{Name: "g1", Architecture: "flux", Mode: types.ModeGenerate}); err != nil {
+		t.Fatal(err)
+	}
+	gen := ImageRequest{Model: "g1", Prompt: "p"}
+	if _, err := srv.validate(&gen, types.ModeGenerate); err != nil {
+		t.Fatal(err)
+	}
+	if gen.Width != nil || gen.Height != nil {
+		t.Errorf("generate should not invent a canvas: %v x %v", gen.Width, gen.Height)
 	}
 }

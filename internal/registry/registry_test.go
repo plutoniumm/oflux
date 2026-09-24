@@ -19,6 +19,8 @@ func TestNamesSorted(t *testing.T) {
 		"flux.2-klein",
 		"flux.2-klein-9b",
 		"qwen-image",
+		"qwen-image-2.1",
+		"qwen-image-2.1-uncensored",
 		"qwen-image-edit",
 		"z-image-turbo",
 	}
@@ -280,20 +282,24 @@ func TestResolveCompanionQuantSafetyNet(t *testing.T) {
 // Every curated quant must name a file its source actually publishes.
 func TestResolveCuratedQuantsArePublished(t *testing.T) {
 	published := map[string][]archdb.Quant{
-		"unsloth/Qwen-Image-Edit-2511-GGUF":        {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"QuantStack/FLUX.1-Kontext-dev-GGUF":       {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"QuantStack/FLUX.1-Krea-dev-GGUF":          {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"QuantStack/Qwen-Image-GGUF":               {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"city96/FLUX.1-dev-gguf":                   {"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
-		"city96/FLUX.1-schnell-gguf":               {"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
-		"leejet/FLUX.2-klein-4B-GGUF":              {"Q8_0", "Q4_0"},
-		"leejet/FLUX.2-klein-9B-GGUF":              {"Q8_0", "Q4_0"},
-		"leejet/Z-Image-Turbo-GGUF":                {"Q8_0", "Q6_K", "Q5_0", "Q4_K", "Q4_0", "Q3_K", "Q2_K"},
-		"city96/t5-v1_1-xxl-encoder-gguf":          {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S"},
-		"mradermacher/Qwen2.5-VL-7B-Instruct-GGUF": {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"unsloth/Qwen3-4B-GGUF":                    {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"unsloth/Qwen3-8B-GGUF":                    {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q3_K_M", "Q3_K_S", "Q2_K"},
-		"unsloth/Qwen3-4B-Instruct-2507-GGUF":      {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen-Image-Edit-2511-GGUF":                 {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"QuantStack/FLUX.1-Kontext-dev-GGUF":                {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"QuantStack/FLUX.1-Krea-dev-GGUF":                   {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"QuantStack/Qwen-Image-GGUF":                        {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"city96/FLUX.1-dev-gguf":                            {"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
+		"city96/FLUX.1-schnell-gguf":                        {"Q8_0", "Q6_K", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_S", "Q2_K"},
+		"leejet/FLUX.2-klein-4B-GGUF":                       {"Q8_0", "Q4_0"},
+		"leejet/FLUX.2-klein-9B-GGUF":                       {"Q8_0", "Q4_0"},
+		"leejet/Z-Image-Turbo-GGUF":                         {"Q8_0", "Q6_K", "Q5_0", "Q4_K", "Q4_0", "Q3_K", "Q2_K"},
+		"leejet/Qwen-Image-2.1-GGUF":                        {"Q8_0", "Q6_K", "Q5_0", "Q4_K", "Q4_0", "Q3_K", "Q2_K"},
+		"abenzerps/Qwen-Image-2.1-Uncensored-GGUF":          {"BF16", "Q8_0", "Q6_K", "Q5_K_M", "Q4_K_M", "Q4_0"},
+		"Qwen/Qwen3-VL-8B-Instruct-GGUF":                    {"F16", "Q8_0", "Q4_K_M"},
+		"pottokao/Qwen-Image-2.1-Text-Encoder-Heretic-GGUF": {"F16", "Q8_0", "Q6_K", "Q4_K_M"},
+		"city96/t5-v1_1-xxl-encoder-gguf":                   {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S"},
+		"mradermacher/Qwen2.5-VL-7B-Instruct-GGUF":          {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen3-4B-GGUF":                             {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen3-8B-GGUF":                             {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q3_K_M", "Q3_K_S", "Q2_K"},
+		"unsloth/Qwen3-4B-Instruct-2507-GGUF":               {"Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"},
 	}
 	for _, name := range Names() {
 		mdl, _ := Lookup(name)
@@ -329,5 +335,63 @@ func TestResolveBaseAndRevision(t *testing.T) {
 		if m.Base != want[0] || m.Revision != want[1] {
 			t.Errorf("%s: base/revision = %q/%q, want %q/%q", name, m.Base, m.Revision, want[0], want[1])
 		}
+	}
+}
+
+// Qwen-Image 2.1 pairs its own VAE with the Qwen3-VL encoder and a vision
+// tower; taking any of the three from qwen-image-edit produces a model that
+// loads and then generates garbage, or refuses to see the reference image.
+func TestResolveQwenImage21(t *testing.T) {
+	for _, name := range []string{"qwen-image-2.1", "qwen-image-2.1-uncensored"} {
+		m, ok := Resolve(name, "Q8_0")
+		if !ok {
+			t.Fatalf("Resolve(%s) not ok", name)
+		}
+		if !m.Mode.CanEdit() || !m.Mode.CanGenerate() {
+			t.Errorf("%s: mode = %q, want both", name, m.Mode)
+		}
+		vae, _ := m.Component(types.RoleVAE)
+		if vae.Source != "Comfy-Org/Qwen-Image-2.1" || vae.File != "vae/qwen_image_2.1_vae_bf16.safetensors" {
+			t.Errorf("%s: vae = %s/%s, want the 2.1 RGBA autoencoder", name, vae.Source, vae.File)
+		}
+		// The abliterated entry must also swap the ENCODER: the prompt is read
+		// by Qwen3-VL, so leaving the stock one in place ablates only half the
+		// pipeline.
+		wantLLM, wantMM := "Qwen3VL-8B-Instruct-Q8_0.gguf", "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf"
+		if name == "qwen-image-2.1-uncensored" {
+			wantLLM, wantMM = "qwen3vl_8b_heretic-Q8_0.gguf", "mmproj-qwen3vl_8b_heretic-f16.gguf"
+		}
+		llm, _ := m.Component(types.RoleLLM)
+		if llm.File != wantLLM {
+			t.Errorf("%s: llm = %q, want %s", name, llm.File, wantLLM)
+		}
+		mm, ok := m.Component(types.RoleMMProj)
+		if !ok || mm.File != wantMM {
+			t.Errorf("%s: mmproj = %q (ok=%v), want %s", name, mm.File, ok, wantMM)
+		}
+		// 2.1 derives its flow schedule from the resolution; pinning flow_shift
+		// here would silently override that.
+		if _, pinned := m.Engine.ModelArgs["flow_shift"]; pinned {
+			t.Errorf("%s: flow_shift must not be pinned", name)
+		}
+	}
+
+	// The two entries differ only in the diffusion weights.
+	base, _ := Resolve("qwen-image-2.1", "Q8_0")
+	unc, _ := Resolve("qwen-image-2.1-uncensored", "Q8_0")
+	bd, _ := base.Component(types.RoleDiffusion)
+	ud, _ := unc.Component(types.RoleDiffusion)
+	if bd.File != "qwen_image_2.1-Q8_0.gguf" || ud.File != "qwen-image-2.1-UC-Q8_0.gguf" {
+		t.Errorf("diffusion = %q / %q, want the two distinct conversions", bd.File, ud.File)
+	}
+}
+
+// leejet spells the K-quants bare, so a Q4_K_M request must land on Q4_K and
+// not fall all the way down to Q4_0.
+func TestResolveQwenImage21BareKQuants(t *testing.T) {
+	m, _ := Resolve("qwen-image-2.1", "Q4_K_M")
+	d, _ := m.Component(types.RoleDiffusion)
+	if d.File != "qwen_image_2.1-Q4_K.gguf" {
+		t.Errorf("diffusion = %q, want qwen_image_2.1-Q4_K.gguf", d.File)
 	}
 }

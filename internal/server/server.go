@@ -143,6 +143,9 @@ type ImageRequest struct {
 	Height          *int                   `json:"height,omitempty"`
 	CFG             *float64               `json:"cfg,omitempty"`
 	Guidance        *engineclient.Guidance `json:"guidance,omitempty"`
+	// Transparent asks for an RGBA result. Only some architectures can, and
+	// none take a flag for it — see archdb.AlphaPrompt.
+	Transparent bool `json:"transparent,omitempty"`
 	// KeepAlive: "10m" or seconds; zero means the configured idle TTL.
 	KeepAlive Duration `json:"keep_alive,omitempty"`
 	// Stream makes the response NDJSON whose last line is this ImageResponse.
@@ -214,8 +217,14 @@ func generationErr(err error) error {
 // engine launch flags at pull time, so only caller-supplied OVERRIDES are sent
 // here — an omitted field keeps the model's default. Assumes validate() ran.
 func buildImgGen(m types.Manifest, r ImageRequest, mode types.Mode) engineclient.ImgGenRequest {
+	prompt := r.Prompt
+	if r.Transparent {
+		// The only way to ask: 2.1 decides transparency from the wording alone,
+		// and upstream ships this exact framing as the reliable one.
+		prompt = fmt.Sprintf(archdb.AlphaPrompt, strings.TrimSuffix(strings.TrimSpace(prompt), ".")+".")
+	}
 	ig := engineclient.ImgGenRequest{
-		Prompt:          r.Prompt,
+		Prompt:          prompt,
 		NegativePrompt:  r.NegativePrompt,
 		Width:           r.Width,
 		Height:          r.Height,
@@ -347,6 +356,9 @@ type ModelRow struct {
 	Revision     string     `json:"revision,omitempty"` // HF revision or release tag
 	Preset       bool       `json:"preset,omitempty"`
 	Label        string     `json:"label,omitempty"`
+	// Alpha reports that this model can return a transparent image, so a client
+	// can offer the option instead of hard-coding which checkpoints have RGBA.
+	Alpha bool `json:"alpha,omitempty"`
 }
 
 // Mode comes from archdb, not the manifest: Manifest.Mode is frozen at pull
@@ -360,6 +372,7 @@ func modelRow(m types.Manifest, loaded bool) ModelRow {
 		Loaded:       loaded,
 		Base:         m.Base,
 		Revision:     m.Revision,
+		Alpha:        archdb.SupportsAlpha(m.Architecture),
 	}
 }
 

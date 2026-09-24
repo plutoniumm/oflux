@@ -45,6 +45,19 @@ var curatedLoras = []Lora{
 		Description: "8-step distillation for Qwen-Image-Edit 2511 (better fidelity than 4-step).",
 	},
 	{
+		// Upstream ships this as a 6-step adapter even though the run was
+		// trained on a 4-step schedule: it samples the highest-noise segment in
+		// three, so 6 is the number, not 4. r256 is the one its card says to
+		// use; the r128 below is the same weights truncated.
+		Name:        "qwen-2.1-turbo-6step",
+		Source:      "Viggle/Qwen-Image-2.1-viggle-turbo",
+		File:        "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors",
+		Archs:       []string{"qwen-image-2.1"},
+		Steps:       6,
+		CFG:         1.0, // the student is trained without classifier-free guidance
+		Description: "6-step distillation for Qwen-Image 2.1 (~7x faster). Preview quality: sharper than the base at 6 steps, still short of it at 40.",
+	},
+	{
 		Name:        "qwen-image-lightning-4step",
 		Source:      "lightx2v/Qwen-Image-Lightning",
 		File:        "Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors",

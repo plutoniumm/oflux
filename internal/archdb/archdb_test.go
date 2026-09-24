@@ -191,3 +191,54 @@ func TestCompanionQuantsAreKnownLabels(t *testing.T) {
 		}
 	}
 }
+
+// Qwen-Image 2.1 contains "qwen-image" once separators are stripped, so without
+// priority it resolves to the plain qwen-image arch — which would load the 2.5-VL
+// encoder and the older VAE, the same class of mistake klein hit with flux2.
+func TestMatchKeywordQwenImage21BeforeQwenImage(t *testing.T) {
+	for _, in := range []string{
+		"leejet/Qwen-Image-2.1-GGUF",
+		"qwen_image_2.1-Q4_K.gguf",
+		"abenzerps/Qwen-Image-2.1-Uncensored-GGUF",
+		"qwen-image-2.1-UC-Q8_0.gguf",
+		"Qwen/Qwen-Image-2.1",
+	} {
+		a, ok := MatchKeyword(in)
+		if !ok || a.Name != "qwen-image-2.1" {
+			t.Errorf("MatchKeyword(%q) = %q,%v; want qwen-image-2.1", in, a.Name, ok)
+		}
+	}
+	// ...and the older checkpoints must not be dragged forward into 2.1.
+	for in, want := range map[string]string{
+		"unsloth/Qwen-Image-Edit-2511-GGUF": "qwen-image-edit",
+		"QuantStack/Qwen-Image-GGUF":        "qwen-image",
+	} {
+		if a, ok := MatchKeyword(in); !ok || a.Name != want {
+			t.Errorf("MatchKeyword(%q) = %q,%v; want %q", in, a.Name, ok, want)
+		}
+	}
+}
+
+// 2.1's VAE and encoder are not the ones the older Qwen arches use, and its
+// vision tower is what makes editing work at all.
+func TestQwenImage21Components(t *testing.T) {
+	a, ok := ByName("qwen-image-2.1")
+	if !ok {
+		t.Fatal("qwen-image-2.1 not in archdb")
+	}
+	if !a.Mode.CanEdit() || !a.Mode.CanGenerate() {
+		t.Errorf("mode = %q, want both", a.Mode)
+	}
+	if !a.Alpha {
+		t.Error("qwen-image-2.1 emits RGBA; Alpha should be set")
+	}
+	if vae := a.Companions[types.RoleVAE]; vae.FilePattern == qwenImageVAE.FilePattern {
+		t.Error("2.1 must not reuse the older qwen_image_vae: the docs say they are not interchangeable")
+	}
+	if llm := a.Companions[types.RoleLLM]; llm.Source != "Qwen/Qwen3-VL-8B-Instruct-GGUF" {
+		t.Errorf("llm = %q, want the Qwen3-VL-8B encoder", llm.Source)
+	}
+	if !slices.Contains(a.Roles(), types.RoleMMProj) {
+		t.Error("mmproj must be resolved: without --llm_vision the engine cannot read a reference image")
+	}
+}
