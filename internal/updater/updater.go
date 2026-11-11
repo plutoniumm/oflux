@@ -168,7 +168,7 @@ func Apply(ctx context.Context, rel Release, appPath string) error {
 	}
 	// Validate BEFORE touching the working install: a build that can't run
 	// would otherwise leave the user with no usable app and no way back.
-	if err := validateBundle(ctx, staged, appPath); err != nil {
+	if err := validate(ctx, staged, appPath); err != nil {
 		_ = os.RemoveAll(staged)
 		return fmt.Errorf("rejected downloaded build: %w", err)
 	}
@@ -233,6 +233,11 @@ func teamID(ctx context.Context, bundle string) string {
 	}
 	return ""
 }
+
+// validate is validateBundle everywhere but in tests. A release-signed pair of
+// bundles cannot be built in a test, so without this seam the swap below — the
+// part that can strand a user with no app — would have no test at all.
+var validate = validateBundle
 
 // validateBundle checks a staged bundle is genuinely runnable, and genuinely
 // ours, before it replaces a working install: the executable exists, the code

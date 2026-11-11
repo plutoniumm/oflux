@@ -288,7 +288,7 @@ func sampleParams(m types.Manifest, r ImageRequest, steps *int, cfg *float64) *e
 		if sp.Guidance == nil {
 			sp.Guidance = &engineclient.Guidance{}
 		}
-		if strings.HasPrefix(m.Architecture, "flux") {
+		if archdb.UsesDistilledGuidance(m.Architecture) {
 			if sp.Guidance.DistilledGuidance == nil {
 				sp.Guidance.DistilledGuidance = cfg
 			}
@@ -535,7 +535,18 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	_ = s.sup.Unload(req.Name) // best-effort stop if running
 	freed, collected, err := s.store.RemoveManifest(req.Name)
 	if errors.Is(err, store.ErrManifestNotFound) {
-		fail(w, coded(codeModelNotFound, notFound("model %q not installed", req.Name)))
+		// `oflux ls` lists presets next to models, so delete has to accept the
+		// same names it showed, or removing a listed row fails with "not
+		// installed" and no hint that `oflux preset rm` is the other spelling.
+		// Models first, matching how a request resolves a name in validate.
+		switch perr := s.store.RemovePreset(req.Name); {
+		case perr == nil:
+			writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "kind": "preset"})
+		case errors.Is(perr, store.ErrPresetNotFound):
+			fail(w, coded(codeModelNotFound, notFound("%q is not an installed model or preset", req.Name)))
+		default:
+			fail(w, perr)
+		}
 		return
 	}
 	if err != nil {

@@ -534,6 +534,30 @@ func TestPresetEndpoints(t *testing.T) {
 	}
 }
 
+// `oflux ls` shows presets, so `oflux rm` must delete them: it only ever hit
+// /api/delete, which looked at manifests alone and said "not installed" about a
+// row the user was reading off the screen.
+func TestDeleteFallsBackToPresets(t *testing.T) {
+	srv, st := newTestServer(t)
+	if err := st.WriteManifest(types.Manifest{Name: "g1", Architecture: "flux", Mode: types.ModeGenerate}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WritePreset(store.Preset{Name: "fast", Model: "g1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := postJSON(t, srv, "/api/delete", map[string]any{"name": "fast"}); rec.Code != http.StatusOK {
+		t.Fatalf("delete preset = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.ReadPreset("fast"); !errors.Is(err, store.ErrPresetNotFound) {
+		t.Errorf("preset still readable: %v", err)
+	}
+	rec := postJSON(t, srv, "/api/delete", map[string]any{"name": "fast"})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("second delete = %d, want 404", rec.Code)
+	}
+}
+
 // Transparency has no engine flag: 2.1 reads it out of the prompt, so the edge
 // supplies the wording upstream prescribes. A model without RGBA weights would
 // otherwise return an ordinary opaque image and look like it had worked.
@@ -570,8 +594,13 @@ func TestTransparentWrapsPromptAndRejectsModelsWithoutAlpha(t *testing.T) {
 	}
 
 	bad := ImageRequest{Model: "f1", Prompt: "p", Transparent: true}
-	if _, err := srv.validate(&bad, types.ModeGenerate); err == nil {
+	_, err = srv.validate(&bad, types.ModeGenerate)
+	if err == nil {
 		t.Fatal("transparent on a model without alpha should be a 400")
+	}
+	// The hint names a curated model that really has alpha, read off the registry.
+	if !strings.Contains(err.Error(), "oflux pull qwe-2.1") {
+		t.Errorf("error should suggest an alpha-capable model: %v", err)
 	}
 }
 
@@ -617,6 +646,41 @@ func TestEditCanvasFollowsTheInputImage(t *testing.T) {
 	}
 	if *req.Width != 640 || *req.Height != 480 {
 		t.Errorf("explicit size overwritten: %dx%d", *req.Width, *req.Height)
+	}
+
+	// One side named: it is kept exactly, and the other follows the subject's
+	// aspect instead of dropping to the engine's 512.
+	for _, tc := range []struct{ inW, inH, w, h, wantW, wantH int }{
+		{1000, 500, 512, 0, 512, 256},
+		{1000, 500, 0, 768, 1536, 768},
+		{1000, 500, 600, 0, 600, 320},    // the given side is not re-rounded
+		{100, 100, 4096, 0, 4096, 4096},  // the caller chose the scale: no editCanvasMax
+		{100, 4000, 8192, 0, 8192, 8192}, // still bounded by maxDimension
+	} {
+		req := ImageRequest{Model: "e1", Prompt: "p", Image: ImageInput{pngOf(tc.inW, tc.inH)}}
+		if tc.w > 0 {
+			req.Width = &tc.w
+		} else {
+			req.Height = &tc.h
+		}
+		if _, err := srv.validate(&req, types.ModeEdit); err != nil {
+			t.Fatalf("%+v: validate: %v", tc, err)
+		}
+		if req.Width == nil || req.Height == nil {
+			t.Fatalf("%+v: missing side not inferred", tc)
+		}
+		if *req.Width != tc.wantW || *req.Height != tc.wantH {
+			t.Errorf("%+v -> %dx%d", tc, *req.Width, *req.Height)
+		}
+	}
+	// Nothing to measure: the named side stands and the other is left alone.
+	lone := 640
+	blind := ImageRequest{Model: "e1", Prompt: "p", Image: ImageInput{"AAAA"}, Width: &lone}
+	if _, err := srv.validate(&blind, types.ModeEdit); err != nil {
+		t.Fatal(err)
+	}
+	if *blind.Width != 640 || blind.Height != nil {
+		t.Errorf("undecodable subject: got %d x %v", *blind.Width, blind.Height)
 	}
 
 	// Generate has no subject to measure: the model's own default canvas stands.

@@ -421,22 +421,6 @@ func TestDeriveName(t *testing.T) {
 	}
 }
 
-func TestSuggestedGGUFRepo(t *testing.T) {
-	tests := []struct{ arch, want string }{
-		{"flux", "city96/FLUX.1-dev-gguf"},
-		{"flux-kontext", "QuantStack/FLUX.1-Kontext-dev-GGUF"},
-		{"qwen-image", "QuantStack/Qwen-Image-GGUF"},
-		{"qwen-image-edit", "QuantStack/Qwen-Image-Edit-GGUF"},
-		{"z-image", "leejet/Z-Image-Turbo-GGUF"},
-		{"sdxl", ""},
-	}
-	for _, tt := range tests {
-		if got := suggestedGGUFRepo(tt.arch); got != tt.want {
-			t.Errorf("suggestedGGUFRepo(%q) = %q, want %q", tt.arch, got, tt.want)
-		}
-	}
-}
-
 // The bug a real user hit: an underscored klein-9B matched no keyword, fell
 // through to the flux2 arch and got flux2-dev's Mistral-3 encoder.
 func TestInspect_Flux2Klein9BUnderscores(t *testing.T) {

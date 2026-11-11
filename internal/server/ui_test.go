@@ -18,7 +18,14 @@ func TestServesUIAtRoot(t *testing.T) {
 		t.Errorf("content-type = %q", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"<title>oflux</title>", "/v1/edit", "/api/tags"} {
+	for _, want := range []string{
+		"<title>oflux</title>", "/v1/edit", "/api/tags", "/v1/segment",
+		// A drawn selection has to reach the engine as the mask: dropped, the
+		// editor would still look like it worked and repaint the whole image.
+		"body.mask_image = maskPNG()",
+		// The board autosaves: without it a reload silently loses the work.
+		"indexedDB.open(",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page is missing %q", want)
 		}

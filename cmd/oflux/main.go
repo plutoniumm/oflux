@@ -86,6 +86,8 @@ func commandTable() []command {
 
 		{name: "pull", args: "<name|org/repo>...", summary: "install models (curated names or Hugging Face repos)", run: cmdPull},
 		{name: "run", args: "<name>", summary: "install if needed, then print how to call it", run: cmdRun},
+		{name: "edit", args: `<model> <image>... "<prompt>"`, summary: "edit images and save the result", run: cmdEdit},
+		{name: "generate", aliases: []string{"gen"}, args: `<model> "<prompt>"`, summary: "generate an image from text", run: cmdGenerate},
 		{name: "list", aliases: []string{"ls"}, summary: "list installed models and presets", run: cmdList},
 		{name: "ps", summary: "show currently-loaded models", run: cmdPS},
 		{name: "rm", aliases: []string{"delete"}, args: "<name>...", summary: "remove installed models", run: cmdRm},
@@ -151,6 +153,13 @@ Flags:
               --as <name>               install under a different name
   run:        --keep-alive <dur>        how long the model stays loaded after a
                                         request ("10m"); sent as keep_alive
+  edit/generate:
+              -o, --output <file>       where to save (default oflux-<seed>.png)
+              --steps N  --cfg X  --seed N  --width N  --height N
+              --lora <name>             adapter to apply (repeatable)
+              --ref <image>             extra reference image (repeatable)
+              --mask-prompt "<words>"   edit only: the region to change
+              --negative-prompt / --sampler / --scheduler / --keep-alive
   lora pull:  --file <path-in-repo>     pick one adapter from a multi-adapter repo
               --as <name>               install under a different name
               --for <model-or-arch>     what the adapter is for (repeatable)
@@ -276,23 +285,34 @@ func cmdRun(args []string) error {
 	if len(p.Names) > 1 {
 		return errors.New("run takes one model; use `oflux pull` to install several")
 	}
-	installed, err := listModels()
+	name := cmp.Or(p.Fields["as"], p.Names[0])
+	row, ok, err := findModel(name)
 	if err != nil {
 		return err
 	}
-	name := cmp.Or(p.Fields["as"], p.Names[0])
-	if !slices.ContainsFunc(installed, func(m server.ModelRow) bool { return m.Name == name }) {
+	if !ok {
 		if err := postStream("/api/pull", p.request(p.Names[0])); err != nil {
 			return err
 		}
+		// Listed again: only the installed row knows which routes the model serves.
+		if row, _, err = findModel(name); err != nil {
+			return err
+		}
 	}
-	// Generation happens over HTTP, so --keep-alive is shown where it is sent.
+	// --keep-alive belongs to a generation, so it is shown where it is passed.
 	keepAlive := ""
 	if d := p.Fields["keep_alive"]; d != "" {
-		keepAlive = fmt.Sprintf(",\"keep_alive\":\"%s\"", d)
+		keepAlive = " --keep-alive " + d
 	}
-	fmt.Printf("%s is ready. Try:\n  curl %s/v1/edit -d '{\"model\":\"%s\",\"prompt\":\"...\",\"image\":\"<base64>\"%s}'\n",
-		name, daemonBase(), name, keepAlive)
+	fmt.Printf("%s is ready. Try:\n", name)
+	// The hint used to be /v1/edit for everything, which a generate-only model
+	// answers with a 400. An unknown mode gets both rather than a guess.
+	if row.Mode.CanEdit() || row.Mode == "" {
+		fmt.Printf("  oflux edit %s in.png \"make it night\"%s\n", name, keepAlive)
+	}
+	if row.Mode.CanGenerate() || row.Mode == "" {
+		fmt.Printf("  oflux generate %s \"a fox in the snow\"%s\n", name, keepAlive)
+	}
 	return nil
 }
 
@@ -546,17 +566,7 @@ func showJob(id string) error {
 	if err := getJSON(jobPath(id), &j); err != nil {
 		return err
 	}
-	line := cmp.Or(j.Status, "done")
-	if j.Model != "" {
-		line += "  " + j.Model
-	}
-	if j.Total > 0 {
-		line += fmt.Sprintf("  step %d/%d", j.Step, j.Total)
-	}
-	if j.Elapsed > 0 {
-		line += fmt.Sprintf("  %.0fs", j.Elapsed)
-	}
-	fmt.Printf("%-16s %s\n", cmp.Or(j.Job, id), line)
+	fmt.Printf("%-16s %s\n", cmp.Or(j.Job, id), jobLine(j))
 	return nil
 }
 

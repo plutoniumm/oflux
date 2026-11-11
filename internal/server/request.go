@@ -17,6 +17,7 @@ import (
 
 	"oflux/internal/archdb"
 	"oflux/internal/engineclient"
+	"oflux/internal/registry"
 	"oflux/internal/store"
 	"oflux/internal/types"
 )
@@ -518,7 +519,7 @@ func (s *Server) validate(req *ImageRequest, mode types.Mode) (types.Manifest, e
 	// Alpha is a property of the weights, not a switch, so a model that lacks
 	// it would silently return an opaque image and look like it worked.
 	if req.Transparent && !archdb.SupportsAlpha(m.Architecture) {
-		return m, badRequest("model %q cannot emit transparency — install one that can: oflux pull qwe-2.1", m.Name)
+		return m, badRequest("model %q cannot emit transparency%s", m.Name, alphaHint())
 	}
 
 	// Before spawning an engine: a missing adapter would otherwise surface as an
@@ -577,12 +578,14 @@ func (s *Server) validate(req *ImageRequest, mode types.Mode) (types.Manifest, e
 	// reference image, so an edit that named no size came back downscaled —
 	// silently, however large the input was. Every edit through the web UI was
 	// a 512x512 thumbnail of itself. Match the subject instead.
-	if mode == types.ModeEdit && req.Width == nil && req.Height == nil {
+	// One side named is the same hole: the other fell back to 512, squashing
+	// the subject, so only a fully-specified size skips this.
+	if mode == types.ModeEdit && (req.Width == nil || req.Height == nil) {
 		src := req.Image.First()
 		if src == "" && len(req.RefImages) > 0 {
 			src = req.RefImages[0]
 		}
-		if w, h, ok := canvasFor(src); ok {
+		if w, h, ok := canvasFor(src, req.Width, req.Height); ok {
 			req.Width, req.Height = &w, &h
 		}
 	}
@@ -601,7 +604,11 @@ const editCanvasMax = 2048
 // engine will accept: a multiple of 64, which every supported architecture's
 // patch size divides. ok=false when there is nothing decodable to measure, and
 // the caller then leaves the engine on its own default.
-func canvasFor(b64 string) (w, h int, ok bool) {
+//
+// At most one of wantW/wantH is set. That side is the caller's and comes back
+// exactly as given; the other follows the image's aspect, bounded by
+// maxDimension rather than editCanvasMax because the caller chose the scale.
+func canvasFor(b64 string, wantW, wantH *int) (w, h int, ok bool) {
 	if b64 == "" {
 		return 0, 0, false
 	}
@@ -615,15 +622,32 @@ func canvasFor(b64 string) (w, h int, ok bool) {
 		return 0, 0, false
 	}
 	w, h = cfg.Width, cfg.Height
+	switch {
+	case wantW != nil:
+		return *wantW, roundCanvas(*wantW*h/w, maxDimension), true
+	case wantH != nil:
+		return roundCanvas(*wantH*w/h, maxDimension), *wantH, true
+	}
 	if longest := max(w, h); longest > editCanvasMax {
 		w = w * editCanvasMax / longest // aspect first, rounding second
 		h = h * editCanvasMax / longest
 	}
-	return roundCanvas(w), roundCanvas(h), true
+	return roundCanvas(w, editCanvasMax), roundCanvas(h, editCanvasMax), true
 }
 
-func roundCanvas(v int) int {
-	return min(max((v+32)/64*64, minDimension), editCanvasMax)
+func roundCanvas(v, ceiling int) int {
+	return min(max((v+32)/64*64, minDimension), ceiling)
+}
+
+// alphaHint points at a curated model that can emit transparency: read off
+// the registry, so the suggestion follows a rename instead of going stale.
+func alphaHint() string {
+	for _, n := range registry.Names() {
+		if m, _ := registry.Lookup(n); archdb.SupportsAlpha(m.Arch) {
+			return " — install one that can: oflux pull " + n
+		}
+	}
+	return ""
 }
 
 func imageField(i, n int) string {

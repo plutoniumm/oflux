@@ -123,7 +123,7 @@ func InspectFile(ctx context.Context, f RepoFetcher, repo string, quantPref []st
 				Kind:    types.BlockerNoQuant,
 				Role:    types.RoleDiffusion,
 				Detail:  describeUnusable(diffFiles),
-				Suggest: suggestedGGUFRepo(arch.Name),
+				Suggest: arch.GGUFMirror,
 			}), nil
 		}
 		// No diffusion weights at all — safety net; unusual for a recognized arch.
@@ -495,18 +495,6 @@ func describeUnusable(files []string) string {
 	}
 	return "only unquantized weights found"
 }
-
-// ggufMirrors maps an architecture to a known GGUF mirror to suggest when a
-// repo only ships weights sd-server cannot read.
-var ggufMirrors = map[string]string{
-	"flux":            "city96/FLUX.1-dev-gguf",
-	"flux-kontext":    "QuantStack/FLUX.1-Kontext-dev-GGUF",
-	"qwen-image":      "QuantStack/Qwen-Image-GGUF",
-	"qwen-image-edit": "QuantStack/Qwen-Image-Edit-GGUF",
-	"z-image":         "leejet/Z-Image-Turbo-GGUF",
-}
-
-func suggestedGGUFRepo(arch string) string { return ggufMirrors[arch] }
 
 func isWeightFile(p string) bool {
 	return hasAnySuffix(path.Base(p), ".gguf", ".safetensors")

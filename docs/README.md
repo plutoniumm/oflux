@@ -201,7 +201,8 @@ into the launch flags at install time, which is why this is decided here and not
 per request.
 
 `oflux run <name>` is `pull` plus a printed example call, and installs only if
-the model is missing. It takes the same flags, but one model at a time.
+the model is missing. It takes the same flags, but one model at a time. The
+example it prints is `oflux edit` or `oflux generate`, whichever the model does.
 
 ### LoRAs
 

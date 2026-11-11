@@ -80,6 +80,16 @@ type Arch struct {
 	// so the server prepends the wording upstream prescribes. See AlphaPrompt.
 	Alpha bool
 
+	// DistilledGuidance marks a guidance-distilled architecture: a caller's
+	// "cfg" is the engine's distilled_guidance there, not txt_cfg, which stays
+	// at the 1.0 the launch flags set. The server used to guess this from a
+	// "flux" name prefix.
+	DistilledGuidance bool
+
+	// GGUFMirror is a repo to suggest when the one asked for only ships weights
+	// sd-server cannot read. Empty when no mirror is known.
+	GGUFMirror string
+
 	// DiffFlag overrides the flag that loads the diffusion role. Empty means
 	// "--diffusion-model", right for standalone DiT weights. Full-checkpoint
 	// arches (SD/SDXL) bake UNet+VAE+encoders into one file loaded with
@@ -267,11 +277,13 @@ var (
 // registry is the supported-architecture table.
 var registry = []Arch{
 	{
-		Name:       "flux",
-		ClassNames: []string{"FluxPipeline", "FluxTransformer2DModel"},
-		Keywords:   []string{"flux.1-dev", "flux.1-schnell", "flux1-dev", "flux1-schnell", "flux-krea", "flux.1-krea"},
-		Mode:       types.ModeGenerate,
-		Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleCLIPL, types.RoleT5XXL},
+		Name:              "flux",
+		DistilledGuidance: true,
+		GGUFMirror:        "city96/FLUX.1-dev-gguf",
+		ClassNames:        []string{"FluxPipeline", "FluxTransformer2DModel"},
+		Keywords:          []string{"flux.1-dev", "flux.1-schnell", "flux1-dev", "flux1-schnell", "flux-krea", "flux.1-krea"},
+		Mode:              types.ModeGenerate,
+		Required:          []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleCLIPL, types.RoleT5XXL},
 		Companions: map[types.Role]Companion{
 			types.RoleVAE:   fluxVAE,
 			types.RoleCLIPL: clipL,
@@ -285,11 +297,12 @@ var registry = []Arch{
 		// Qwen3 for klein — and no CLIP-L / T5-XXL. Ground truth: docs/flux2.md
 		//   --diffusion-model flux2-dev-*.gguf --vae flux2_ae.safetensors \
 		//   --llm Mistral-Small-3.2-24B-Instruct-2506-*.gguf --diffusion-fa
-		Name:       "flux2",
-		ClassNames: []string{"Flux2Pipeline", "Flux2Transformer2DModel"},
-		Keywords:   []string{"flux.2", "flux2", "flux-2"},
-		Mode:       types.ModeBoth,
-		Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
+		Name:              "flux2",
+		DistilledGuidance: true,
+		ClassNames:        []string{"Flux2Pipeline", "Flux2Transformer2DModel"},
+		Keywords:          []string{"flux.2", "flux2", "flux-2"},
+		Mode:              types.ModeBoth,
+		Required:          []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
 		Companions: map[types.Role]Companion{
 			// Comfy-Org ships the flux2 VAE and a purpose-built fp8 Mistral-3
 			// text encoder as fixed single files (no per-quant variants).
@@ -305,11 +318,12 @@ var registry = []Arch{
 		//   --diffusion-model flux-2-klein-4b.safetensors \
 		//   --vae flux2_ae.safetensors --llm qwen_3_4b.safetensors \
 		//   --cfg-scale 1.0 --steps 4 --diffusion-fa
-		Name:       "flux2-klein",
-		ClassNames: []string{"Flux2KleinPipeline"},
-		Keywords:   []string{"flux.2-klein", "flux2-klein", "flux-2-klein"},
-		Mode:       types.ModeBoth,
-		Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
+		Name:              "flux2-klein",
+		DistilledGuidance: true,
+		ClassNames:        []string{"Flux2KleinPipeline"},
+		Keywords:          []string{"flux.2-klein", "flux2-klein", "flux-2-klein"},
+		Mode:              types.ModeBoth,
+		Required:          []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleLLM},
 		Companions: map[types.Role]Companion{
 			// Comfy-Org's mirror is ungated where black-forest-labs/FLUX.2-dev
 			// (docs/flux2.md's link for the VAE) needs a licence accepted. It
@@ -336,11 +350,13 @@ var registry = []Arch{
 		Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 4, "sample_method": "euler"},
 	},
 	{
-		Name:       "flux-kontext",
-		ClassNames: []string{"FluxKontextPipeline"},
-		Keywords:   []string{"kontext"},
-		Mode:       types.ModeEdit,
-		Required:   []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleCLIPL, types.RoleT5XXL},
+		Name:              "flux-kontext",
+		DistilledGuidance: true,
+		GGUFMirror:        "QuantStack/FLUX.1-Kontext-dev-GGUF",
+		ClassNames:        []string{"FluxKontextPipeline"},
+		Keywords:          []string{"kontext"},
+		Mode:              types.ModeEdit,
+		Required:          []types.Role{types.RoleDiffusion, types.RoleVAE, types.RoleCLIPL, types.RoleT5XXL},
 		Companions: map[types.Role]Companion{
 			types.RoleVAE:   fluxVAE,
 			types.RoleCLIPL: clipL,
@@ -351,6 +367,7 @@ var registry = []Arch{
 	},
 	{
 		Name:       "qwen-image",
+		GGUFMirror: "QuantStack/Qwen-Image-GGUF",
 		ClassNames: []string{"QwenImagePipeline"},
 		Keywords:   []string{"qwen-image", "qwen_image"},
 		Mode:       types.ModeGenerate,
@@ -364,6 +381,7 @@ var registry = []Arch{
 	},
 	{
 		Name:       "qwen-image-edit",
+		GGUFMirror: "QuantStack/Qwen-Image-Edit-GGUF",
 		ClassNames: []string{"QwenImageEditPipeline", "QwenImageEditPlusPipeline"},
 		Keywords:   []string{"qwen-image-edit", "qwen_image_edit"},
 		Mode:       types.ModeBoth,
@@ -417,6 +435,7 @@ var registry = []Arch{
 	},
 	{
 		Name:       "z-image",
+		GGUFMirror: "leejet/Z-Image-Turbo-GGUF",
 		ClassNames: []string{"ZImagePipeline"},
 		Keywords:   []string{"z-image", "z_image"},
 		Mode:       types.ModeGenerate,
@@ -504,6 +523,13 @@ const AlphaPrompt = "This is an RGBA image with transparency. %s The image has a
 func SupportsAlpha(arch string) bool {
 	a, ok := ByName(arch)
 	return ok && a.Alpha
+}
+
+// UsesDistilledGuidance reports whether a caller's cfg belongs in the engine's
+// distilled_guidance field for arch; an unknown arch gets ordinary txt_cfg.
+func UsesDistilledGuidance(arch string) bool {
+	a, ok := ByName(arch)
+	return ok && a.DistilledGuidance
 }
 
 // ModeOf returns the mode archdb currently believes arch supports, falling back

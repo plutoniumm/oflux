@@ -242,3 +242,38 @@ func TestQwenImage21Components(t *testing.T) {
 		t.Error("mmproj must be resolved: without --llm_vision the engine cannot read a reference image")
 	}
 }
+
+// These two facts used to live as a name-prefix test in the server and a
+// second arch table in compat; archdb is where both are read from now.
+func TestGuidanceAndMirrorPerArch(t *testing.T) {
+	for _, tt := range []struct {
+		arch      string
+		distilled bool
+		mirror    string
+	}{
+		{"flux", true, "city96/FLUX.1-dev-gguf"},
+		{"flux-kontext", true, "QuantStack/FLUX.1-Kontext-dev-GGUF"},
+		{"flux2", true, ""},
+		{"flux2-klein", true, ""},
+		{"qwen-image", false, "QuantStack/Qwen-Image-GGUF"},
+		{"qwen-image-edit", false, "QuantStack/Qwen-Image-Edit-GGUF"},
+		{"qwen-image-2.1", false, ""},
+		{"z-image", false, "leejet/Z-Image-Turbo-GGUF"},
+		{"chroma", false, ""}, // flux-derived, but samples with real CFG
+		{"sdxl", false, ""},
+	} {
+		a, ok := ByName(tt.arch)
+		if !ok {
+			t.Fatalf("unknown arch %q", tt.arch)
+		}
+		if got := UsesDistilledGuidance(tt.arch); got != tt.distilled {
+			t.Errorf("UsesDistilledGuidance(%q) = %v, want %v", tt.arch, got, tt.distilled)
+		}
+		if a.GGUFMirror != tt.mirror {
+			t.Errorf("%s GGUFMirror = %q, want %q", tt.arch, a.GGUFMirror, tt.mirror)
+		}
+	}
+	if UsesDistilledGuidance("flux-from-the-future") {
+		t.Error("an unknown arch must fall back to txt_cfg, not match by name prefix")
+	}
+}

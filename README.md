@@ -23,7 +23,13 @@ From source: `make engine && make install` (needs Go and `brew install librsvg`)
 oflux pull qwe-2511 flx-2-klein-4b  # curated names or Hugging Face repos
 oflux list / ps
 oflux rm <name>...                        # several at a time
+oflux edit qwe-2511 photo.png "make it night time" -o night.png
+oflux generate zim-1-turbo "a fox in a spacesuit"
 ```
+
+`edit` takes one or more images (the first is the subject, the rest are
+references) with the prompt last; both save a PNG and print its seed.
+`oflux help` lists the flags (`--steps`, `--seed`, `--lora`, `--mask-prompt`, …).
 
 Then open <http://localhost:11534> for the UI, or:
 
