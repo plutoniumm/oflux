@@ -96,12 +96,20 @@ type Arch struct {
 	// "--model", so they set DiffFlag.
 	DiffFlag string
 
-	// switchFlags are non-value flags, e.g. "--diffusion-fa".
+	// switchFlags are fixed arguments appended as-is, e.g. diffusionFA.
 	switchFlags []string
 
 	// variants refine the architecture for a concrete checkpoint; see For.
 	variants []variant
 }
+
+// diffusionFA is flash attention on the diffusion model only. sd.cpp
+// master-1106 deprecated the old switch for exactly this, --diffusion-fa, in
+// favour of this spelling. Manifests pulled before carry the old switch; the
+// supervisor translates it at launch (legacyFlags). The engine's own default
+// is now "auto", which may also enable it for the encoders and VAE — untested
+// here, so the old meaning is kept.
+var diffusionFA = []string{"--flash-attn", "off,diffusion=on"}
 
 // variant is a sibling checkpoint that launches through the same architecture
 // but needs different companions: klein-4B is encoded by Qwen3-4B, klein-9B by
@@ -289,7 +297,7 @@ var registry = []Arch{
 			types.RoleCLIPL: clipL,
 			types.RoleT5XXL: t5xxlGGUF,
 		},
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 20, "sample_method": "euler"},
 	},
 	{
@@ -309,7 +317,7 @@ var registry = []Arch{
 			types.RoleVAE: {Source: "Comfy-Org/flux2-dev", FilePattern: "split_files/vae/flux2-vae.safetensors"},
 			types.RoleLLM: {Source: "Comfy-Org/flux2-dev", FilePattern: "split_files/text_encoders/mistral_3_small_flux2_fp8.safetensors"},
 		},
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 28, "sample_method": "euler"},
 	},
 	{
@@ -346,7 +354,7 @@ var registry = []Arch{
 				},
 			},
 		}},
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 4, "sample_method": "euler"},
 	},
 	{
@@ -362,7 +370,7 @@ var registry = []Arch{
 			types.RoleCLIPL: clipL,
 			types.RoleT5XXL: t5xxlGGUF,
 		},
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 1.0, "steps": 28, "sample_method": "euler"},
 	},
 	{
@@ -376,7 +384,7 @@ var registry = []Arch{
 			types.RoleVAE: qwenImageVAE,
 			types.RoleLLM: qwen25VL,
 		},
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 2.5, "flow_shift": 3, "steps": 20, "sample_method": "euler"},
 	},
 	{
@@ -399,7 +407,7 @@ var registry = []Arch{
 			types.RoleLLM:    qwen25VL,
 			types.RoleMMProj: {Source: qwen25VL.Source, FilePattern: "Qwen2.5-VL-7B-Instruct.mmproj-f16.gguf"},
 		},
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 2.5, "flow_shift": 3, "steps": 20, "sample_method": "euler"},
 	},
 	{
@@ -430,7 +438,7 @@ var registry = []Arch{
 		// No flow_shift: 2.1 picks its flow schedule from the resolution itself,
 		// and pinning one here would override that. 40 steps and cfg 6.0 are the
 		// upstream defaults (QwenLM README, docs/qwen_image_2.1.md).
-		switchFlags: []string{"--diffusion-fa"},
+		switchFlags: diffusionFA,
 		Defaults:    map[string]any{"cfg_scale": 6.0, "steps": 40, "sample_method": "euler"},
 	},
 	{

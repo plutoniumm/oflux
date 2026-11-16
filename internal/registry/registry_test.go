@@ -232,7 +232,7 @@ func TestResolveFlux2Klein(t *testing.T) {
 	}
 	// klein is few-step; the engine should launch with those defaults baked in.
 	joined := strings.Join(m.Engine.Flags, " ")
-	for _, want := range []string{"--steps 4", "--cfg-scale 1", "--diffusion-fa"} {
+	for _, want := range []string{"--steps 4", "--cfg-scale 1", "--flash-attn off,diffusion=on"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("engine flags %q missing %q", joined, want)
 		}

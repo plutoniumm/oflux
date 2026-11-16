@@ -120,6 +120,14 @@ func New(opts Options) *Supervisor {
 	}
 }
 
+// legacyFlags rewrites switches that installed manifests were written with and
+// the engine has since deprecated. A manifest is frozen at pull time, so this
+// is the only place an installed model can learn the new spelling before
+// upstream removes the old one and every launch fails on an unknown flag.
+var legacyFlags = map[string][]string{
+	"--diffusion-fa": {"--flash-attn", "off,diffusion=on"}, // deprecated in sd.cpp master-1106
+}
+
 var placeholderRoles = map[string]types.Role{
 	"{diffusion}":   types.RoleDiffusion,
 	"{vae}":         types.RoleVAE,
@@ -137,6 +145,10 @@ var placeholderRoles = map[string]types.Role{
 func buildArgs(m types.Manifest, blobPath func(string) string, host, port, loraDir string) ([]string, error) {
 	args := make([]string, 0, len(m.Engine.Flags)+2*len(m.Engine.ModelArgs)+4)
 	for _, f := range m.Engine.Flags {
+		if repl, ok := legacyFlags[f]; ok {
+			args = append(args, repl...)
+			continue
+		}
 		if role, ok := placeholderRoles[f]; ok {
 			comp, ok := m.Component(role)
 			if !ok {
@@ -243,7 +255,7 @@ func (s *Supervisor) run(ctx context.Context, m types.Manifest, req engineclient
 		return nil, err
 	}
 	if eng.Status != "completed" {
-		return nil, &engineclient.JobError{Op: "img_gen", Status: eng.Status, Reason: eng.Error}
+		return nil, &engineclient.JobError{Op: "img_gen", Status: eng.Status, Reason: string(eng.Error)}
 	}
 	imgs, err := eng.ImagesB64()
 	if err != nil {

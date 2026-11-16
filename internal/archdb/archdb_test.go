@@ -59,8 +59,11 @@ func TestBaseFlagsHasRolePlaceholders(t *testing.T) {
 			t.Errorf("flags %v missing pair %v", flags, wp)
 		}
 	}
-	if !slices.Contains(flags, "--diffusion-fa") {
-		t.Errorf("flags %v missing --diffusion-fa", flags)
+	if i := slices.Index(flags, "--flash-attn"); i < 0 || i+1 >= len(flags) || flags[i+1] != "off,diffusion=on" {
+		t.Errorf("flags %v missing --flash-attn off,diffusion=on", flags)
+	}
+	if slices.Contains(flags, "--diffusion-fa") {
+		t.Errorf("flags %v use the deprecated --diffusion-fa", flags)
 	}
 	// mmproj must NOT be present (2511 target).
 	if slices.Contains(flags, "--llm_vision") {

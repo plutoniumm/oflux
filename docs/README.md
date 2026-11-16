@@ -138,7 +138,7 @@ oflux lora pull qwen-edit-lightning-4step
 
 | Name | Applies to | Steps | CFG | What it is |
 |------|-----------|-------|-----|------------|
-| `qwen-2.1-turbo-6step` | `qwen-image-2.1` | 6 | 1.0 | 6-step distillation for Qwen-Image 2.1 (~5.6x faster). Preview quality; sd.cpp binds 326 of its 454 tensors. |
+| `qwen-2.1-turbo-6step` | `qwen-image-2.1` | 6 | 1.0 | 6-step distillation for Qwen-Image 2.1 (~5.6x faster). Preview quality. |
 | `qwen-edit-lightning-4step` | `qwen-image-edit` | 4 | 1.0 | 4-step distillation for Qwen-Image-Edit 2511 (~5x faster edits). |
 | `qwen-edit-lightning-8step` | `qwen-image-edit` | 8 | 1.0 | 8-step distillation for Qwen-Image-Edit 2511 (better fidelity than 4-step). |
 | `qwen-image-lightning-4step` | `qwen-image` | 4 | 1.0 | 4-step distillation for Qwen-Image text-to-image. |

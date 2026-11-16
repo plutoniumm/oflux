@@ -120,6 +120,29 @@ func TestPollCompleted(t *testing.T) {
 	}
 }
 
+// Verbatim shapes from sd-server master-1106: a failed or cancelled job's
+// error is an object, and must decode to its message rather than fail the poll.
+func TestPollErrorObject(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"id":"j","status":"cancelled","result":null,"error":{"code":"cancelled","message":"job cancelled by client"}}`, "job cancelled by client"},
+		{`{"id":"j","status":"failed","result":null,"error":{"code":"generation_failed"}}`, "generation_failed"},
+		{`{"id":"j","status":"failed","error":"plain text"}`, "plain text"},
+		{`{"id":"j","status":"generating","error":null}`, ""},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		job, err := newTestClient(t, srv).Poll(context.Background(), "j")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("Poll(%s): %v", tc.body, err)
+		}
+		if string(job.Error) != tc.want {
+			t.Errorf("Error = %q, want %q", job.Error, tc.want)
+		}
+	}
+}
+
 func TestWaitTransitions(t *testing.T) {
 	_, b64 := tinyPNG(t)
 	var calls int32

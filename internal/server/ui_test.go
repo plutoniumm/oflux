@@ -23,6 +23,11 @@ func TestServesUIAtRoot(t *testing.T) {
 		// A drawn selection has to reach the engine as the mask: dropped, the
 		// editor would still look like it worked and repaint the whole image.
 		"body.mask_image = maskPNG()",
+		// Several selected objects are a subject plus references; flattened into
+		// one picture, the model could no longer tell which is which.
+		"body.image = sub.refs.length ? [sub.img, ...sub.refs] : sub.img",
+		// Nothing else on the page says Shift-click adds a reference.
+		"Click: add as a reference",
 		// The board autosaves: without it a reload silently loses the work.
 		"indexedDB.open(",
 	} {

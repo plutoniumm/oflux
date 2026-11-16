@@ -69,11 +69,9 @@ true`. There is no engine switch for it: the model decides from the wording of
 the prompt, so oflux supplies the phrasing Qwen prescribes. Asking a model that
 cannot is a 400 rather than a silently opaque image.
 
-**Known upstream bug:** on Metal the subject decodes correctly but much of the
-background comes back opaque white instead of transparent, so the cut-out needs
-cleaning up by hand. That is [stable-diffusion.cpp#2024][sd2024], not something
-oflux can fix from here — raising steps does not help. The alpha channel itself
-is real, so a cleanup pass on the result works.
+Engines older than sd.cpp master-1106 decoded much of the background as opaque
+white instead of transparent on Metal ([stable-diffusion.cpp#2024][sd2024]); the
+bundled engine is past the fix.
 
 [sd2024]: https://github.com/leejet/stable-diffusion.cpp/issues/2024
 

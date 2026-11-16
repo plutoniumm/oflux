@@ -90,7 +90,7 @@ func TestBuildArgs(t *testing.T) {
 	want := []string{
 		"--diffusion-model", "/blobs/sha256-diff",
 		"--vae", "/blobs/sha256-vae",
-		"--diffusion-fa",
+		"--flash-attn", "off,diffusion=on", // an installed manifest's --diffusion-fa, translated
 		"--model-args", "qwen_image_zero_cond_t=true",
 		"--lora-model-dir", "/store/loras",
 		"--listen-ip", "127.0.0.1",
@@ -536,7 +536,10 @@ func TestLastSamplingBar(t *testing.T) {
 		{"sampling", "\r  |=====>   | 3/28 - 6.69s/it\x1b[K", 3, 28, true},
 		{"newest wins", "| 1/28 - 6.7s/it| 2/28 - 6.7s/it", 2, 28, true},
 		{"iterations per second", "| 9/10 - 1.50it/s", 9, 10, true},
+		// Verbatim from sd.cpp master-1106: padded rate, then an ETA.
+		{"padded rate with ETA", "\r  |========>      | 1/6 -   5.80s/it - ETA 00:29\x1b[K", 1, 6, true},
 		{"tensor load is not sampling", "  |####| 129/219 - 1.02GB/s", 0, 0, false},
+		{"padded tensor load is not sampling", "  |####   | 203/297 -   4.13GB/s\x1b[K", 0, 0, false},
 		{"plain log line", "[INFO ] sampling completed, taking 195.19s", 0, 0, false},
 	}
 	for _, tc := range cases {

@@ -26,7 +26,7 @@ auth_args() {
 have_creds() {
   local auth=()
   while IFS= read -r a; do auth+=("$a"); done < <(auth_args)
-  xcrun notarytool history "${auth[@]}" >/dev/null 2>&1
+  APPLE_SAYS="$(xcrun notarytool history "${auth[@]}" 2>&1 >/dev/null)"
 }
 
 no_creds_help() {
@@ -43,7 +43,10 @@ EOF
 }
 
 if [ "${1:-}" = "--check" ]; then
-  have_creds || { no_creds_help; exit 1; }
+  # Apple's own words first: a lapsed developer agreement is a 403 with valid
+  # credentials, and the store-credentials advice alone sent us re-saving a
+  # password that was fine (1.5.1).
+  have_creds || { echo "${APPLE_SAYS:-}" >&2; no_creds_help; exit 1; }
   echo "==> notarization credentials OK"
   exit 0
 fi

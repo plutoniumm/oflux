@@ -73,8 +73,30 @@ type ImgGenRequest struct {
 type Job struct {
 	ID     string          `json:"id"`
 	Status string          `json:"status"`
-	Error  string          `json:"error"`
+	Error  jobErrText      `json:"error"`
 	Result json.RawMessage `json:"result"`
+}
+
+// jobErrText is a job's "error", which sd-server sends as {"code","message"}.
+// It was decoded into a plain string, so every failed or cancelled job failed
+// to DECODE: the poll was retried until it gave up and the caller saw a JSON
+// type error instead of the engine's reason (verified against 88411ef and
+// master-1106; the fake engine sent a string, which hid it). A string is still
+// accepted.
+type jobErrText string
+
+func (e *jobErrText) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*e = jobErrText(s)
+		return nil
+	}
+	var o struct{ Code, Message string }
+	if err := json.Unmarshal(b, &o); err != nil {
+		return err
+	}
+	*e = jobErrText(cmp.Or(o.Message, o.Code))
+	return nil
 }
 
 // Reason is the engine's raw failure text, which for a model that cannot run is

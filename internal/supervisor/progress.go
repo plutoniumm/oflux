@@ -9,14 +9,15 @@ import (
 	"time"
 )
 
-// The engine's job payload carries no progress. Verified against the bundled
-// sd-server: its own web UI polls the four endpoints oflux does and renders
-// id, kind, status, queue_position, created, started, completed, result, error
-// — no step field exists. Progress only ever reaches the log the supervisor
-// already captures, as "\r  |=====>  | 3/28 - 6.69s/it\x1b[K". Tensor-loading
-// bars share the N/M shape but report MB/s, which is what the rate unit below
-// discriminates on.
-var samplingBar = regexp.MustCompile(`\|\s*(\d+)/(\d+) - [0-9.]+(?:s/it|it/s)`)
+// Progress is scraped from the log the supervisor already captures, as
+// "\r  |=====>  | 3/28 - 6.69s/it\x1b[K". Tensor-loading bars share the N/M
+// shape but report MB/s, which is what the rate unit below discriminates on. Engines before master-1106 had no progress in the job
+// payload at all; 1106 added a "progress" object (stage, completed/total
+// steps), which would be the cleaner source if the log ever stops carrying the
+// bar. master-1106 also pads the rate and appends an ETA —
+// "| 1/6 -   5.80s/it - ETA 00:29" — and a pattern wanting exactly one space
+// after the dash silently stopped reporting progress at all.
+var samplingBar = regexp.MustCompile(`\|\s*(\d+)/(\d+) -\s+[0-9.]+(?:s/it|it/s)`)
 
 const (
 	progressPoll = 250 * time.Millisecond

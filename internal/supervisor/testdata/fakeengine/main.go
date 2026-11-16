@@ -165,11 +165,15 @@ func (s *fakeServer) getJob(w http.ResponseWriter, id string) {
 	var jobErr any
 	done := n >= 2 && !strings.Contains(prompt, "hold")
 	switch {
+	// The object shape is what sd-server really sends; a string here once hid
+	// that oflux could not decode it.
 	case cancelled:
 		status = "cancelled"
+		jobErr = map[string]string{"code": "cancelled", "message": "job cancelled by client"}
 	case done && strings.Contains(prompt, "fail"):
 		status = "failed"
-		jobErr = "ggml_metal_graph_compute: command buffer 0 failed\nstack trace line 1\nstack trace line 2"
+		jobErr = map[string]string{"code": "generation_failed",
+			"message": "ggml_metal_graph_compute: command buffer 0 failed\nstack trace line 1\nstack trace line 2"}
 	case done:
 		status = "completed"
 		result = json.RawMessage(fmt.Sprintf(`{"output_format":"png","images":[{"index":0,"b64_json":%q}]}`, s.pngB64))
